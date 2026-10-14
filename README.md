@@ -13,7 +13,9 @@ stay in the game; press Esc again when you're ready to go back to Claude. If Cla
 you're handed back at once and dropped in again after you answer. In auto mode
 the classifier answers most prompts, so play goes on through those.
 
-Game Boy and Game Boy Color games both work. It was built against Pokémon Yellow.
+Any Game Boy or Game Boy Color game works (`.gb`, `.gbc`). You open the ones
+you own, and ClaudeBoy keeps them in a Game Library to switch between, each
+with its own saves. It was built against Pokémon Yellow.
 
 ## Setup
 
@@ -26,10 +28,7 @@ Game Boy and Game Boy Color games both work. It was built against Pokémon Yello
 
    `/claudeboy` runs this for you if you skip it.
 
-2. Put a ROM where ClaudeBoy looks: `~/.local/share/claudeboy/roms/`, or this
-   folder (or its `roms/`). `/claudeboy rom <path>` picks any other file.
-
-3. Load the mod. To try it for one session:
+2. Load the mod. To try it for one session:
 
    ```
    claude --plugin-dir ~/Desktop/ClaudeBoy
@@ -43,7 +42,10 @@ Game Boy and Game Boy Color games both work. It was built against Pokémon Yello
    claude plugin install claudeboy@claudeboy
    ```
 
-4. Turn it on with `/claudeboy`. `/claudeboy off` turns it off again.
+3. Turn it on with `/claudeboy`. The first time, it asks for a game: pick one
+   it found in your Downloads, Desktop, Documents or Games folder, or type or
+   paste the path to a `.gb` or `.gbc` file. `/claudeboy off` turns it off
+   again.
 
 ## Playing
 
@@ -56,14 +58,23 @@ Esc hands you back to Claude, or, during the countdown, keeps you playing.
 | A | Z |
 | B | X |
 | Start | Enter |
-| Select | Backspace |
+| Select | Shift (or Backspace) |
+
+ClaudeBoy's own keys show under the game, a few to a row:
 
 | ClaudeBoy | Key |
 | :- | :- |
 | Save to a slot | S, then 1–9 |
 | Load a slot | L, then 1–9 |
+| Open another game | O |
+| Game Library: switch to a game you opened before | G, then 1–9 or the arrows and Enter |
 | Sound on or off | M (off at first) |
-| Fast-forward ×2, ×4, then back | F |
+| Speed ×1, ×2, ×4 | F |
+| Back to Claude | Esc |
+
+The game pauses while O or G is open, and Esc goes back to it. Shift for
+Select works on the console; terminals don't report Shift alone, so in kitty
+and Ghostty Select stays Backspace.
 
 Outside kitty and Ghostty the game plays on a Game Boy in Claude's orange,
 drawn in pixel art: its D-pad, A, B, Select and Start light up and press in
@@ -149,7 +160,8 @@ pictures through.
 /claudeboy save <1-9>   save to a slot
 /claudeboy load <1-9>   load a slot
 /claudeboy slots        list the slots
-/claudeboy rom [path]   list the ROMs found, or pick one by number or path
+/claudeboy open [path]  open a game (.gb, .gbc); without a path, pick one
+/claudeboy games [n]    list the Game Library, or play game n
 /claudeboy sound on|off
 /claudeboy display auto|cells|image
 ```

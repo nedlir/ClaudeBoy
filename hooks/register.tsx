@@ -29,7 +29,8 @@ const MESSAGE_MS = 2500
 // The dock's width asked for when the pane opens; the person's own wins
 const DOCK_COLUMNS = 100
 const INLINE_ROWS = 40
-const STATUS_ROWS = 2
+// The status line, then up to three rows of hints
+const STATUS_ROWS = 4
 
 const SCREEN_WIDTH = 160
 const SCREEN_HEIGHT = 144
@@ -47,7 +48,7 @@ const IMAGE_FAILURES_BEFORE_CELLS = 10
 const ROM_EXTENSIONS = /\.(gb|gbc)$/i
 const SLOTS = ['1', '2', '3', '4', '5', '6', '7', '8', '9']
 
-const CONTROLS = '←↑↓→ move · Z is A · X is B · Enter is Start · Backspace is Select'
+const CONTROLS = 'the arrows, Z for A, X for B, Enter for Start, Shift for Select'
 
 const HELP = [
   'ClaudeBoy plays a Game Boy game in a pane while Claude works, and saves it when you are handed back.',
@@ -58,16 +59,20 @@ const HELP = [
   '  /claudeboy save <1-9>   save to a slot',
   '  /claudeboy load <1-9>   load a slot',
   '  /claudeboy slots        list the slots',
-  '  /claudeboy rom [path]   list the ROMs found, or pick one by number or path',
+  '  /claudeboy open [path]  open a Game Boy game (.gb, .gbc) and play it from now on',
+  '  /claudeboy games [n]     list the games opened so far, or play one',
   '  /claudeboy sound on|off',
   '  /claudeboy display auto|cells|image|window',
   '',
-  'In the game: ' + CONTROLS + '. S saves to a slot, L loads one, M turns the sound on or off, F fast-forwards ×2, ×4, then back.',
+  'In the game: S: save · L: load · O: open · G: Game Library · M: sound · F: speed ×1, ×2, ×4 · Esc: exit.',
+  "The Game Boy's buttons: " + CONTROLS + '.',
 ].join('\n')
 
 type Phase = 'idle' | 'waiting' | 'offered' | 'playing' | 'countdown'
 type Display = 'auto' | 'cells' | 'image' | 'window'
 type Game = { rom: string; key: string; title: string; isColor: boolean }
+// A game the person opened, in their library
+type LibraryGame = { rom: string; title: string }
 type Reply = { isOk: boolean; words: string }
 type Command = { id: number; name: string; arg: string; resolve: (reply: Reply) => void; timer: Timer }
 type Size = { columns: number; rows: number }
@@ -79,6 +84,11 @@ type PadPost = { pad: string; held: number; taps: number[]; keys: { seq: number;
 // Settings, kept between sessions in $.store
 let isOn = false
 let romChoice: string | null = null
+// The games opened so far, in the order opened; whether the store kept one
+let library: LibraryGame[] = []
+let isLibraryKept = false
+// Whether ClaudeBoy was used before the library: its ROM goes in it
+let wasUsed = false
 let isSoundOn = false
 let display: Display = 'auto'
 
@@ -161,6 +171,14 @@ let padId: string | null = null
 let lastKeySeq = 0
 let hasKeys = false
 let picker: 'save' | 'load' | null = null
+// The pane's menus over the game, paused meanwhile: opening a game (a path,
+// or one found on this computer) or the library; what went wrong in it; and
+// whether to play once a game is opened (/claudeboy play with none)
+let menu: 'open' | 'games' | null = null
+let menuError: string | null = null
+let foundRoms: string[] = []
+let isPlayAfterOpen = false
+let isSwitchingGame = false
 let slotTimes: Record<string, number> = {}
 let message: string | null = null
 let messageTimer: Timer | null = null
@@ -203,31 +221,79 @@ async function findRoms($: Dollar): Promise<string[]> {
   return found
 }
 
-// Reads the ROM's title and save key, building the engine first if need be.
-// Returns what's wrong, or null when there's a game to play.
+const NO_GAME = 'No game yet: press O in ClaudeBoy, or run /claudeboy open <path to a .gb or .gbc file>.'
+
+// The game to play: the one last chosen from the library, read for its title
+// and save key, the engine built first if need be. Returns what's wrong, or
+// null when there's a game to play.
 async function loadGame($: Dollar): Promise<string | null> {
   const built = await ensureEngine($)
   if (built) return built
-  const choice = romChoice && (await $.fs.exists(romChoice)) ? romChoice : null
-  const rom = choice ?? (await findRoms($))[0]
-  if (!rom) {
+  await keepFirstGame($)
+  const entry = library.find((kept) => kept.rom === romChoice) ?? library[0]
+  if (!entry) {
     game = null
-    return 'No ROM found. Put a .gb or .gbc file in ' + dataDir + '/roms, or pick one with /claudeboy rom <path>.'
+    return NO_GAME
   }
-  if (game?.rom === rom) return null
-  return readGame($, rom)
+  if (game?.rom === entry.rom) return null
+  const read = await readGame($, entry.rom)
+  if (typeof read === 'string') return read
+  game = read
+  return null
 }
 
-async function readGame($: Dollar, rom: string): Promise<string | null> {
+// From before the library: the game ClaudeBoy played becomes its first entry
+async function keepFirstGame($: Dollar) {
+  if (isLibraryKept) return
+  isLibraryKept = true
+  if (!wasUsed) return
+  const rom = romChoice && (await $.fs.exists(romChoice)) ? romChoice : (await findRoms($))[0]
+  if (!rom) return
+  const read = await readGame($, rom)
+  if (typeof read === 'string') return
+  library = [{ rom, title: read.title }]
+  await $.store.set('library', library)
+}
+
+async function readGame($: Dollar, rom: string): Promise<Game | string> {
   const { stdout } = await $.process.run([enginePath(), 'info', rom])
   try {
     const info = JSON.parse(stdout) as { title?: string; key?: string; color?: boolean; error?: string }
     if (info.error || !info.key) return "Can't play " + rom + ': ' + (info.error ?? 'unreadable')
-    game = { rom, key: info.key, title: prettyTitle(info.title ?? '') || 'Game Boy', isColor: info.color === true }
-    return null
+    return { rom, key: info.key, title: prettyTitle(info.title ?? '') || 'Game Boy', isColor: info.color === true }
   } catch {
     return "ClaudeBoy's emulator couldn't read " + rom
   }
+}
+
+// Opens a game: added to the library, and played from here on, each game
+// with saves of its own. The one being played is saved first.
+async function switchGame($: Dollar, path: string): Promise<string | null> {
+  const built = await ensureEngine($)
+  if (built) return built
+  const rom = expandHome(path.trim().replace(/^(['"])(.*)\1$/, '$2'))
+  if (!ROM_EXTENSIONS.test(rom)) return 'That isn\'t a Game Boy game: open a .gb or .gbc file.'
+  if (!(await $.fs.exists(rom))) return 'No file at ' + rom + '.'
+  const read = await readGame($, rom)
+  if (typeof read === 'string') return read
+  await keepFirstGame($)
+  if (!library.some((kept) => kept.rom === rom)) {
+    library = [...library, { rom, title: read.title }]
+    await $.store.set('library', library)
+  }
+  romChoice = rom
+  await $.store.set('rom', rom)
+  if (game?.rom === rom) return null
+  // The engine plays one game: the old one saves as it ends, a new one starts
+  isSwitchingGame = true
+  try {
+    await stopEngine($)
+  } finally {
+    isSwitchingGame = false
+  }
+  forgetPicture()
+  game = read
+  return null
 }
 
 let build: Promise<string | null> | null = null
@@ -396,6 +462,9 @@ function keepPlaying($: Dollar) {
 // Leaving the pane, whoever closes it: pause, which saves the game
 function goAway($: Dollar, why: string) {
   isAskingTakeover = false
+  menu = null
+  menuError = null
+  isPlayAfterOpen = false
   const wasPlaying = phase === 'playing' || phase === 'countdown'
   if (!wasPlaying && !isWelcomeOpen && !wanted.isPlaying) {
     cancelTimer()
@@ -477,7 +546,7 @@ async function runEngine($: Dollar) {
   // Ending on its own while someone plays means it failed or was refused;
   // while they're away, the next drop-in simply starts it again. It also ends
   // when this module unloads, and then there's nothing to close.
-  if (phase === 'playing' || phase === 'countdown') {
+  if ((phase === 'playing' || phase === 'countdown') && !isSwitchingGame) {
     try {
       $.ui.toast(engineError ?? "ClaudeBoy's emulator stopped", { timeoutMs: 8000 })
       await handBack($, '')
@@ -744,16 +813,17 @@ function statusLine(): { text: string; isStrong: boolean } {
     return { text: wanted.view === 'window' ? 'Click here to play' : 'Click the game to play · Esc goes back to Claude', isStrong: true }
   }
   const doing = isOpenedByCommand ? 'Playing' : isTurnRunning ? 'Claude is working' : "Claude's done · Esc goes back"
-  return { text: doing + ' · ' + CONTROLS, isStrong: false }
+  return { text: doing, isStrong: false }
 }
 
-function hintLine(): string {
-  if (picker) return SLOTS.map((slot) => slot + ' ' + (slotTimes[slot] ? ago(slotTimes[slot]) : '–')).join(' · ')
-  if (wanted.view === 'window') {
-    // The drawer's line is short: X's font is wide
-    return 'S save · L load · M sound ' + (isSoundOn ? 'off' : 'on') + ' · F ' + (nextSpeed() > 1 ? '×' + nextSpeed() : '×1') + ' · Esc back'
+// ClaudeBoy's own keys, the ones the Game Boy doesn't have: dim, as Claude
+// Code's hints are, at most three to a row. F with the speed now.
+function hintRows(): string[] {
+  if (picker) {
+    const slots = SLOTS.map((slot) => slot + ': ' + (slotTimes[slot] ? ago(slotTimes[slot]) : 'empty'))
+    return [slots.slice(0, 3), slots.slice(3, 6), slots.slice(6, 9)].map((row) => row.join(' · '))
   }
-  return 'S save · L load · M sound ' + (isSoundOn ? 'off' : 'on') + ' · F ' + (nextSpeed() > 1 ? 'speed ×' + nextSpeed() : 'normal speed')
+  return ['S: save · L: load · Esc: exit', 'O: open · G: Game Library', 'M: sound · F: ×' + wanted.speed]
 }
 
 // The engine's run folder's name, drawn in the pane under the game window:
@@ -763,10 +833,10 @@ function marker(): string {
   return runDir ? runDir.slice(runDir.lastIndexOf('/') + 1) : ''
 }
 
-// The drawer's two lines under the game: what's going on, then what keys do
+// The drawer's lines under the game: what's going on, then what keys do
 function windowTitle(): string {
-  const status = statusLine().text.replace(' · ' + CONTROLS, '')
-  return (game?.title ?? 'ClaudeBoy') + ' · ' + status + '\n' + hintLine()
+  const status = statusLine().text
+  return [(game?.title ?? 'ClaudeBoy') + ' · ' + status, ...hintRows()].join('\n')
 }
 
 // The biggest picture that fits above the status lines at the screen's own
@@ -942,7 +1012,92 @@ async function onKey($: Dollar, key: string) {
     wanted.speed = nextSpeed()
     scheduleControl($)
     showMessage($, wanted.speed > 1 ? 'Fast-forward ×' + wanted.speed : 'Normal speed')
+  } else if (key === 'o') {
+    await openMenu($, 'open')
+  } else if (key === 'g') {
+    await openMenu($, 'games')
   }
+}
+
+// ---------------------------------------------------------------------------
+// Opening games, and the library
+
+// Shows a menu in the pane, the game paused under it, the pane taking the
+// keys: typed paths, 1–9, the arrows and Enter reach the menu
+async function openMenu($: Dollar, which: 'open' | 'games') {
+  if (which === 'games') {
+    await ensureEngine($)
+    await keepFirstGame($)
+    // An empty library has nothing to pick: open a game instead
+    if (!library.length) which = 'open'
+  }
+  if (which === 'open') foundRoms = await findRomsNearby($)
+  menu = which
+  menuError = null
+  picker = null
+  if (phase === 'playing' || phase === 'countdown') {
+    cancelTimer()
+    phase = 'playing'
+    wanted.isPlaying = false
+    wanted.countdown = 0
+    scheduleControl($)
+  }
+  if (pictureMode() === 'window') await openDrawerPane($, true)
+  else await openPane($)
+  redraw($)
+}
+
+// Back to the game, or to the welcome
+async function closeMenu($: Dollar) {
+  menu = null
+  menuError = null
+  if (isPlayAfterOpen && game) {
+    isPlayAfterOpen = false
+    await playNow($)
+    return
+  }
+  isPlayAfterOpen = false
+  if (phase === 'playing') {
+    await startPlaying($)
+    if (pictureMode() === 'window') await openDrawerPane($)
+    else await openPane($)
+  }
+  if (isWelcomeOpen) showWelcomeStatus($, game ? 'Ready to play ' + game.title + '.' : NO_GAME)
+  redraw($)
+}
+
+// A game picked from a menu, or a path typed into it
+async function chooseGame($: Dollar, path: string) {
+  if (!path.trim()) return
+  menuError = null
+  redraw($)
+  const problem = await switchGame($, path)
+  if (problem) {
+    menuError = problem
+    redraw($)
+    return
+  }
+  await closeMenu($)
+}
+
+// Game Boy games in the usual places, not yet in the library: offered when
+// opening a game, so most never need typing
+async function findRomsNearby($: Dollar): Promise<string[]> {
+  const folders = ['Downloads', 'Desktop', 'Documents', 'Games', 'roms', ''].map((name) => home + (name ? '/' + name : ''))
+  folders.push(root, root + '/roms', dataDir + '/roms')
+  const found: string[] = []
+  for (const folder of folders) {
+    try {
+      const entries = await $.fs.list(folder)
+      for (const entry of [...entries].sort((a, b) => a.name.localeCompare(b.name))) {
+        const rom = folder + '/' + entry.name
+        if (entry.kind === 'file' && ROM_EXTENSIONS.test(entry.name) && !found.includes(rom) && !library.some((kept) => kept.rom === rom)) {
+          found.push(rom)
+        }
+      }
+    } catch {}
+  }
+  return found.slice(0, 9)
 }
 
 // The speed after this one: ×1, ×2, ×4, then ×1 again
@@ -969,7 +1124,9 @@ async function turnOn($: Dollar) {
   }
   void (async () => {
     const problem = await loadGame($)
-    showWelcomeStatus($, problem ?? 'Ready to play ' + (game?.title ?? 'your game') + '.')
+    // No game yet: the first thing is to open one
+    if (problem === NO_GAME && isWelcomeOpen) await openMenu($, 'open')
+    else showWelcomeStatus($, problem ?? 'Ready to play ' + (game?.title ?? 'your game') + '.')
   })()
   return {}
 }
@@ -985,6 +1142,11 @@ async function turnOff($: Dollar) {
 
 async function playNow($: Dollar) {
   const problem = await loadGame($)
+  if (problem === NO_GAME) {
+    isPlayAfterOpen = true
+    await openMenu($, 'open')
+    return {}
+  }
   if (problem) return { text: problem }
   isOpenedByCommand = true
   if (phase === 'playing' || phase === 'countdown') {
@@ -1031,35 +1193,30 @@ async function listSlots($: Dollar) {
   return { text: game.title + ' (' + auto + '):\n' + lines.join('\n') + '\n\nIn the game, S saves to a slot and L loads one.' }
 }
 
-async function chooseRom($: Dollar, choice: string) {
-  const built = await ensureEngine($)
-  if (built) return { text: built }
-  const roms = await findRoms($)
-  if (!choice) {
-    const current = game?.rom ?? romChoice
-    const lines = roms.map((rom, i) => '  ' + (i + 1) + '  ' + rom + (rom === current ? '  (playing)' : ''))
-    return {
-      text:
-        (roms.length ? 'ROMs found:\n' + lines.join('\n') : 'No ROMs found.') +
-        '\n\nPick one with /claudeboy rom <number or path>. ClaudeBoy looks in ' +
-        dataDir +
-        '/roms and the plugin folder.',
-    }
+// /claudeboy open [path]: opens that game; without one, the pane's picker
+async function openCommand($: Dollar, path: string) {
+  if (!path) {
+    await openMenu($, 'open')
+    return {}
   }
-  const rom = /^\d+$/.test(choice) ? roms[Number(choice) - 1] : expandHome(choice)
-  if (!rom || !(await $.fs.exists(rom))) return { text: 'No ROM at ' + (rom ?? 'number ' + choice) + '.' }
-  // The game being played is saved before another takes its place
-  if (phase !== 'idle') await handBack($, '')
-  await stopEngine($)
-  const before = game
-  const problem = await readGame($, rom)
-  if (problem) {
-    game = before
-    return { text: problem }
-  }
-  romChoice = rom
-  await $.store.set('rom', rom)
+  const problem = await switchGame($, path)
+  if (problem) return { text: problem }
+  if (phase === 'playing' || phase === 'countdown') await startPlaying($)
   return { text: 'ClaudeBoy plays ' + game?.title + ' now.' }
+}
+
+// /claudeboy games [n]: lists the library, or plays a game from it
+async function gamesCommand($: Dollar, choice: string) {
+  await ensureEngine($)
+  await keepFirstGame($)
+  if (!choice) {
+    if (!library.length) return { text: NO_GAME }
+    const lines = library.map((kept, i) => '  ' + (i + 1) + '  ' + kept.title + (kept.rom === game?.rom ? '  (playing)' : '') + '\n     ' + kept.rom)
+    return { text: 'Game Library:\n' + lines.join('\n') + '\n\nPlay one with /claudeboy games <number>, or press G in ClaudeBoy.' }
+  }
+  const kept = library[Number(choice) - 1]
+  if (!/^\d+$/.test(choice) || !kept) return { text: 'No game number ' + choice + '. /claudeboy games lists them.' }
+  return openCommand($, kept.rom)
 }
 
 async function setSound($: Dollar, value: string) {
@@ -1102,6 +1259,12 @@ export const register: Register = (on) => {
     isOn = (await $.store.get('isOn')) === true
     const rom = await $.store.get('rom')
     romChoice = typeof rom === 'string' ? rom : null
+    const kept = await $.store.get('library')
+    isLibraryKept = Array.isArray(kept)
+    library = isLibraryKept
+      ? (kept as unknown[]).filter((entry): entry is LibraryGame => typeof (entry as LibraryGame)?.rom === 'string')
+      : []
+    wasUsed = romChoice !== null || (await $.store.get('isOn')) !== undefined
     // Off until the person turns it on: the game opens unasked, often at work
     isSoundOn = (await $.store.get('sound')) === true
     const shown = await $.store.get('display')
@@ -1109,7 +1272,7 @@ export const register: Register = (on) => {
     await $.command.register({
       name: 'claudeboy',
       description: 'Play a Game Boy game while Claude works',
-      argumentHint: '[play|off|save <1-9>|load <1-9>|slots|rom [path]|sound on|off|display auto|cells|image|help]',
+      argumentHint: '[play|off|open [path]|games [n]|save <1-9>|load <1-9>|slots|sound on|off|display auto|cells|image|help]',
       immediate: true,
     })
     return next(e)
@@ -1138,8 +1301,10 @@ export const register: Register = (on) => {
         return slotCommand($, verb.toLowerCase() as 'save' | 'load', first)
       case 'slots':
         return listSlots($)
-      case 'rom':
-        return chooseRom($, rest)
+      case 'open':
+        return openCommand($, rest)
+      case 'games':
+        return gamesCommand($, rest)
       case 'sound':
         return setSound($, (first ?? '').toLowerCase())
       case 'display':
@@ -1173,7 +1338,7 @@ export const register: Register = (on) => {
     isTurnRunning = false
     if (phase === 'waiting' || phase === 'offered') {
       withdrawOffer($)
-    } else if (phase === 'playing' && !isOpenedByCommand) {
+    } else if (phase === 'playing' && !isOpenedByCommand && !menu) {
       if (e.isAborted) await handBack($, '')
       else startCountdown($)
     }
@@ -1199,6 +1364,12 @@ export const register: Register = (on) => {
   // The person closed the pane (this module's own closes go through handBack)
   on('ui.close', async ($, e, next) => {
     if (e.id !== PANE) return next(e)
+    // Esc in a menu goes back to the game (or the welcome)
+    if (e.origin?.kind === 'person' && menu) {
+      isPlayAfterOpen = false
+      await closeMenu($)
+      return { value: undefined }
+    }
     // Esc during the countdown keeps playing: the pane stays open
     if (e.origin?.kind === 'person' && phase === 'countdown') {
       keepPlaying($)
@@ -1269,7 +1440,65 @@ export const register: Register = (on) => {
       const { Text } = $.ui.resolve(e)
       return <Text>ClaudeBoy plays in the terminal.</Text>
     }
-    const { Box, Text, Button, Raster, Image, Client } = $.ui.resolve(e)
+    const { Box, Text, Button, Input, Raster, Image, Client } = $.ui.resolve(e)
+
+    if (menu === 'open') {
+      const isFirst = !library.length
+      return (
+        <Box flexDirection="column" gap={1}>
+          <Text bold>{isFirst ? 'Open your first Game Boy game' : 'Open a Game Boy game'}</Text>
+          {foundRoms.length ? (
+            <Box flexDirection="column">
+              <Text dimColor>Found on this computer:</Text>
+              {foundRoms.map((rom, i) => (
+                <Button
+                  key={'found-' + i}
+                  label={rom.slice(rom.lastIndexOf('/') + 1)}
+                  hotkey={String(i + 1)}
+                  plain
+                  {...(i === 0 ? { autoFocus: true as const } : {})}
+                  onPress={() => chooseGame($, rom)}
+                />
+              ))}
+            </Box>
+          ) : null}
+          <Input
+            key="rom-path"
+            label="Or its path"
+            placeholder="~/Downloads/game.gb"
+            submitLabel="open"
+            {...(foundRoms.length ? {} : { autoFocus: true as const })}
+            onSubmit={(path) => chooseGame($, path)}
+          />
+          {menuError ? <Text color="red">{menuError}</Text> : null}
+          <Text dimColor>
+            {(foundRoms.length ? '1–' + foundRoms.length + ' or ↑↓ and Enter picks one · ' : '') + 'Esc goes back'}
+          </Text>
+        </Box>
+      )
+    }
+    if (menu === 'games') {
+      return (
+        <Box flexDirection="column" gap={1}>
+          <Text bold>Game Library</Text>
+          <Box flexDirection="column">
+            {library.map((kept, i) => (
+              <Button
+                key={'game-' + i}
+                label={kept.title + (kept.rom === game?.rom ? '  · playing' : '')}
+                {...(i < 9 ? { hotkey: String(i + 1) } : {})}
+                plain
+                {...(i === 0 ? { autoFocus: true as const } : {})}
+                onPress={() => chooseGame($, kept.rom)}
+              />
+            ))}
+            <Button key="games-open" label="Open another game…" hotkey="o" plain onPress={() => openMenu($, 'open')} />
+          </Box>
+          {menuError ? <Text color="red">{menuError}</Text> : null}
+          <Text dimColor>1–9 or ↑↓ and Enter · Esc goes back</Text>
+        </Box>
+      )
+    }
 
     if (isWelcomeOpen) {
       return (
@@ -1280,7 +1509,7 @@ export const register: Register = (on) => {
             of its own in other terminals. You're handed back when Claude is done or needs you, and the game is saved
             each time.
           </Text>
-          <Text>{CONTROLS}. S saves to a slot, L loads one, M turns the sound on or off, F fast-forwards ×2, ×4, then back.</Text>
+          <Text>In the game: S: save · L: load · O: open · G: Game Library · M: sound · F: speed · Esc: exit</Text>
           {welcomeStatus ? <Text color={welcomeStatus.startsWith('Ready') ? 'green' : undefined}>{welcomeStatus}</Text> : null}
           <Text dimColor>/claudeboy play opens it now · /claudeboy help lists the rest · /claudeboy off turns it off</Text>
           <Button
@@ -1341,9 +1570,11 @@ export const register: Register = (on) => {
             <Text bold={isStrong} wrap="truncate-end">
               {text === 'Click here to play' ? 'Click the game to play' : text}
             </Text>
-            <Text dimColor wrap="truncate-end">
-              {hintLine()}
-            </Text>
+            {hintRows().map((row, i) => (
+              <Text key={'hint-' + i} dimColor wrap="truncate-end">
+                {row}
+              </Text>
+            ))}
           </Box>
         </Box>
       )
@@ -1368,7 +1599,6 @@ export const register: Register = (on) => {
     if (!picture) return <Text dimColor>Starting {game?.title ?? 'the game'}…</Text>
 
     const { text: status, isStrong } = statusLine()
-    const hint = hintLine()
 
     return (
       <Box flexDirection="column">
@@ -1381,9 +1611,11 @@ export const register: Register = (on) => {
           <Text bold={isStrong} wrap="truncate-end">
             {status}
           </Text>
-          <Text dimColor wrap="truncate-end">
-            {hint}
-          </Text>
+          {hintRows().map((row, i) => (
+            <Text key={'hint-' + i} dimColor wrap="truncate-end">
+              {row}
+            </Text>
+          ))}
         </Box>
       </Box>
     )

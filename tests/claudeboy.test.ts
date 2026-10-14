@@ -6,6 +6,8 @@ type MockClock = ReturnType<typeof mock.clock>
 
 const ROM = '/home/ada/.local/share/claudeboy/roms/Pokemon Yellow.gb'
 const INFO = '{"title":"POKEMON YELLOW","key":"pokemon-yellow-7d527d62","color":true}'
+const TETRIS = '/home/ada/Downloads/Tetris.gb'
+const TETRIS_INFO = '{"title":"TETRIS","key":"tetris-46df91ad","color":false}'
 // A frame of 100 by 45 cells, each an upper half block, as the engine writes
 // them: 0x2580 then two colors, little-endian, base64. Every cell is the same,
 // so the twelve bytes of one encode to sixteen characters, repeated.
@@ -31,7 +33,9 @@ function channel() {
       isClosed = true
       nudge()
     },
+    // Each engine started drains it afresh: one ended doesn't end the next
     async *drain(): AsyncGenerator<string> {
+      isClosed = false
       for (;;) {
         while (lines.length > 0) yield lines.shift() as string
         if (isClosed) return
@@ -153,8 +157,14 @@ function stubClaudeCode(
     }
     return { value: undefined }
   })
-  on('process.run', () => ({
-    value: { exitCode: 0, stdout: INFO, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+  on('process.run', ($, e) => ({
+    value: {
+      exitCode: 0,
+      stdout: e.argv.includes(TETRIS) ? TETRIS_INFO : INFO,
+      stderr: '',
+      isStdoutTruncated: false,
+      isStderrTruncated: false,
+    },
   }))
   on('process.spawn', async function* ($, e) {
     world.spawns.push(e.argv)
@@ -201,7 +211,7 @@ const GAME = {
     isFocused: true,
     bodyColumns: 100,
     placement: 'dock',
-    scroll: { offset: 0, bodyRows: 47 },
+    scroll: { offset: 0, bodyRows: 49 },
     view: {},
   },
 } as const
@@ -409,7 +419,7 @@ test('the picture follows the pane as it resizes, in the middle at the screen\'s
   await game.redraw({ ...GAME.props, bodyColumns: 60 })
   expect(world.control()).toContain('view=image:600x550')
   // Wide and short: the height decides, and the picture sits in the middle
-  await game.redraw({ ...GAME.props, bodyColumns: 200, scroll: { offset: 0, bodyRows: 20 } })
+  await game.redraw({ ...GAME.props, bodyColumns: 200, scroll: { offset: 0, bodyRows: 22 } })
   expect(world.control()).toContain('view=image:440x396')
   const view = await game.find({ key: 'view' })
   expect([view?.props.columns, view?.props.rows]).toEqual([44, 18])
@@ -623,7 +633,7 @@ function titleOf(line: string): string {
   return new TextDecoder().decode(Uint8Array.from(atob(encoded), (c) => c.charCodeAt(0)))
 }
 
-const HINT = 'S save · L load · M sound on · F ×2 · Esc back'
+const HINT = 'S: save · L: load · Esc: exit\nO: open · G: Game Library\nM: sound · F: ×1'
 const WORKING = 'Pokemon Yellow · Claude is working\n' + HINT
 
 test('in a terminal without pictures, the game plays in a drawer, the pane making room', SLOW, async ($, on) => {
@@ -737,8 +747,8 @@ test('in a maximized terminal the console is laid over the pane, made wide enoug
   expect(world.openColumns.at(-1)).toBe(56)
   const game = await $.ui.mount({ ...GAME, props: { ...GAME.props, bodyColumns: 56, scroll: { offset: 0, bodyRows: 25 } } })
   // The box: the pane's body from column 64, below its top row, all but the
-  // two status rows
-  expect(world.control()).toContain(' overlay=64,1,56,23 ')
+  // four status rows
+  expect(world.control()).toContain(' overlay=64,1,56,21 ')
   expect(await game.find({ text: /Click the game to play/ })).toBeDefined()
   // Under the console, the run folder's name: how the engine tells which
   // terminal tab is this session's, to show the console only while it's in front
@@ -812,4 +822,76 @@ test('turning ClaudeBoy on or off in one session reaches the others at their nex
   await $.turn.start({ turnId: 't2', text: 'again' })
   await clock.advance(2000)
   expect(world.opens).toBe(1)
+})
+
+test('O opens a game by its path: added to the library, played from then on', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on, clock, { env: { DISPLAY: ':0' } })
+  await startSession($)
+
+  await $.turn.start({ turnId: 't1', text: 'refactor auth' })
+  await clock.advance(2000)
+  world.engine.push('@focus 1')
+  world.engine.push('@key o')
+  await clock.settle()
+  // The game pauses under the menu, which has the keys
+  expect(world.control()).toMatch(/^play=0 /)
+  const game = await $.ui.mount(GAME)
+  expect(await game.find({ text: /Open a Game Boy game/ })).toBeDefined()
+
+  await game.input({ key: 'rom-path', text: TETRIS })
+  await clock.settle()
+  expect(world.store.library).toEqual([
+    { rom: '/home/ada/.local/share/claudeboy/roms/Pokemon Yellow.gb', title: 'Pokemon Yellow' },
+    { rom: TETRIS, title: 'Tetris' },
+  ])
+  expect(world.store.rom).toBe(TETRIS)
+  // Pokémon saved as its engine ended; Tetris plays in one of its own
+  expect(world.spawns.at(-1)?.[2]).toBe(TETRIS)
+  expect(world.spawns.at(-1)?.[3]).toBe('/home/ada/.local/share/claudeboy/saves/tetris-46df91ad')
+  expect(world.control()).toMatch(/^play=1 /)
+  expect(world.toasts).not.toContain("ClaudeBoy's emulator stopped")
+})
+
+test('G lists the games opened; picking one plays it', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on, clock, {
+    env: { DISPLAY: ':0' },
+    store: {
+      isOn: true,
+      library: [
+        { rom: '/home/ada/.local/share/claudeboy/roms/Pokemon Yellow.gb', title: 'Pokemon Yellow' },
+        { rom: TETRIS, title: 'Tetris' },
+      ],
+    },
+  })
+  await startSession($)
+
+  await $.turn.start({ turnId: 't1', text: 'refactor auth' })
+  await clock.advance(2000)
+  world.engine.push('@key g')
+  await clock.settle()
+  const game = await $.ui.mount(GAME)
+  expect(await game.find({ text: /Pokemon Yellow {2}· playing/ })).toBeDefined()
+  await game.press({ key: 'game-1' })
+  await clock.settle()
+  expect(world.spawns.at(-1)?.[2]).toBe(TETRIS)
+  expect(world.control()).toMatch(/^play=1 /)
+})
+
+test('the first time, ClaudeBoy asks for a game before anything plays', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on, clock, { store: {} })
+  await startSession($)
+
+  await $.command.run({ command: 'claudeboy', args: '' } as never)
+  await clock.settle()
+  const game = await $.ui.mount(GAME)
+  expect(await game.find({ text: /Open your first Game Boy game/ })).toBeDefined()
+  expect(world.store.library).toBeUndefined()
+
+  await game.input({ key: 'rom-path', text: TETRIS })
+  await clock.settle()
+  expect(world.store.library).toEqual([{ rom: TETRIS, title: 'Tetris' }])
+  expect(await game.find({ text: /Ready to play Tetris/ })).toBeDefined()
 })

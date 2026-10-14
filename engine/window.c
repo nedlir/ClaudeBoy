@@ -13,6 +13,9 @@
 
 #include "console.h"
 
+// Under the drawer's console: the status, then up to three rows of hints
+#define WINDOW_LINES 4
+
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -403,7 +406,7 @@ struct GameWindow {
 	int lineHeight;
 	int ascent;
 	int charWidth;
-	char lines[2][192];
+	char lines[WINDOW_LINES][192];
 
 	// The desktop's work area, and the box of it the window is laid over
 	// instead of docking, when it is
@@ -480,7 +483,7 @@ static void setOpacity(struct GameWindow* window, double alpha) {
 #define DIM_TEXT_COLOR 0x8C8C98u
 
 static int textArea(const struct GameWindow* window) {
-	return window->hasFont && !window->isOverlay ? 2 * window->lineHeight + 14 : 0;
+	return window->hasFont && !window->isOverlay ? WINDOW_LINES * window->lineHeight + 14 : 0;
 }
 
 static unsigned long pixelOf(const struct GameWindow* window, uint32_t rgb) {
@@ -553,8 +556,8 @@ static void drawIcon(unsigned long* icon, int size) {
 	}
 }
 
-// The status, two lines apart, as Latin-1 for X's fonts and WM_NAME: what
-// Latin-1 lacks becomes a dash
+// The status, a line apart from each hint row, as Latin-1 for X's fonts and
+// WM_NAME: what Latin-1 lacks becomes a dash
 static void setTitle(struct GameWindow* window, const char* utf8) {
 	memset(window->lines, 0, sizeof(window->lines));
 	int line = 0;
@@ -569,8 +572,8 @@ static void setTitle(struct GameWindow* window, const char* utf8) {
 			}
 		}
 		if (codepoint == '\n') {
-			if (line == 0) {
-				line = 1;
+			if (line < WINDOW_LINES - 1) {
+				line++;
 				length = 0;
 			}
 			continue;
@@ -579,8 +582,13 @@ static void setTitle(struct GameWindow* window, const char* utf8) {
 			window->lines[line][length++] = (char) (codepoint <= 0xFF ? codepoint : '-');
 		}
 	}
-	char name[400];
-	snprintf(name, sizeof(name), "%s%s%s", window->lines[0], window->lines[1][0] ? " - " : "", window->lines[1]);
+	char name[WINDOW_LINES * 200] = "";
+	for (int i = 0; i < WINDOW_LINES && window->lines[i][0]; i++) {
+		if (i > 0) {
+			strcat(name, " - ");
+		}
+		strcat(name, window->lines[i]);
+	}
 	X.StoreName(window->display, window->window, name);
 	char joined[512];
 	size_t out = 0;
@@ -918,6 +926,8 @@ static int buttonOf(KeySym symbol) {
 	case 0x58: // X
 		return 1; // B
 	case 0xFF08: // BackSpace
+	case 0xFFE1: // Shift_L
+	case 0xFFE2: // Shift_R
 		return 2; // Select
 	case 0xFF0D: // Return
 	case 0xFF8D: // KP_Enter
@@ -1240,7 +1250,7 @@ void gameWindowDraw(struct GameWindow* window, const uint32_t* frame) {
 	}
 	if (window->hasFont && !window->isOverlay) {
 		const int most = (width - 2 * DRAWER_MARGIN) / window->charWidth;
-		for (int line = 0; line < 2; line++) {
+		for (int line = 0; line < WINDOW_LINES; line++) {
 			const int length = (int) strlen(window->lines[line]);
 			X.SetForeground(window->display, window->textGc, pixelOf(window, line == 0 ? TEXT_COLOR : DIM_TEXT_COLOR));
 			X.DrawString(window->display, window->window, window->textGc, left,
