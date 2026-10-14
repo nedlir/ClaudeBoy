@@ -1472,7 +1472,8 @@ export const register: Register = (on) => {
           />
           {menuError ? <Text color="red">{menuError}</Text> : null}
           <Text dimColor>
-            {(foundRoms.length ? '1–' + foundRoms.length + ' or ↑↓ and Enter picks one · ' : '') + 'Esc goes back'}
+            {(foundRoms.length ? (foundRoms.length > 1 ? '1–' + foundRoms.length : '1') + ' or ↑↓ and Enter picks one · ' : '') +
+              'Esc goes back'}
           </Text>
         </Box>
       )
