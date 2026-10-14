@@ -1,6 +1,6 @@
 // The gamepad: catches keys over the game picture and posts which Game Boy
 // buttons are held, which the hooks module hands to the engine. Other keys
-// (S, L, M, F and digits for the slots) are posted as they come.
+// (S, L, O, G, M, F, and digits for the slots) are posted as they come.
 //
 // The terminal reports presses, never releases. A lone press is a tap, held
 // long enough for any game to see and short enough that taps a few frames
@@ -8,6 +8,9 @@
 // as long as its repeats keep coming.
 //
 // Time here is the frame clock's: each tick of `surface.every` moves it on.
+// REPEAT_GAP_MS must stay under the slowest key repeat it should take for a
+// hold (80 ms: repeats at 12.5 a second or faster), and HOLD_WHILE_REPEATING_MS
+// over it, so a hold doesn't flicker between repeats.
 
 import type { ClientModule } from 'claude-code'
 

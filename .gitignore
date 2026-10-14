@@ -4,8 +4,8 @@ dist/
 # Written by Claude Code for the editor
 .claude-plugin/types/
 # Games and saves are yours, not the repository's
-*.gb
-*.gbc
+*.[gG][bB]
+*.[gG][bB][cC]
 *.sav
 *.state
 roms/

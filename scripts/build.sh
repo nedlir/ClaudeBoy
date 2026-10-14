@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Builds ClaudeBoy's engine into dist/claudeboy-engine: mGBA's Game Boy core,
 # fetched once at a pinned version and checked against its checksum, with
-# engine/claudeboy-engine.c on top. Needs curl (the first time), cmake and a C
-# compiler; everything it makes stays in this folder.
+# the engine (engine/*.c) on top. Needs curl (the first time), cmake, make, tar
+# and a C compiler; everything it makes stays in this folder.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -17,7 +17,7 @@ fail() {
   exit 1
 }
 
-for tool in cmake cc tar; do
+for tool in cmake make cc tar; do
   command -v "$tool" >/dev/null || fail "ClaudeBoy's build needs $tool"
 done
 
@@ -26,7 +26,8 @@ sha256() {
 }
 
 mkdir -p "$BUILD" "$ROOT/dist"
-if [ ! -f "$SOURCE/CMakeLists.txt" ]; then
+# Unpacked whole, or not at all: a stamp written last
+if [ ! -f "$SOURCE/.unpacked" ]; then
   archive="$BUILD/mgba-$MGBA_VERSION.tar.gz"
   if [ ! -f "$archive" ]; then
     command -v curl >/dev/null || fail "ClaudeBoy's build needs curl to fetch mGBA"
@@ -38,7 +39,9 @@ if [ ! -f "$SOURCE/CMakeLists.txt" ]; then
     rm -f "$archive"
     fail "mGBA's archive doesn't match its checksum; run this again to fetch it anew"
   fi
+  rm -rf "$SOURCE"
   tar -xzf "$archive" -C "$BUILD"
+  touch "$SOURCE/.unpacked"
 fi
 
 jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
@@ -47,6 +50,7 @@ echo "Building mGBA's Game Boy core…"
 log="$BUILD/mgba-build.log"
 if ! { cmake -S "$SOURCE" -B "$LIBRARY" \
   -DLIBMGBA_ONLY=ON -DM_CORE_GBA=OFF -DM_CORE_GB=ON -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
   -DUSE_DEBUGGERS=OFF -DENABLE_SCRIPTING=OFF -DUSE_GDB_STUB=OFF -DBUILD_LTO=OFF &&
   cmake --build "$LIBRARY" -j "$jobs"; } >"$log" 2>&1; then
   tail -n 20 "$log" >&2

@@ -3,6 +3,10 @@
   "displayName": "ClaudeBoy",
   "version": "0.1.0",
   "description": "Play a Game Boy game while Claude works, saved each time you're handed back",
+  "author": {
+    "name": "nedlir"
+  },
+  "repository": "https://github.com/nedlir/ClaudeBoy",
   "keywords": [
     "game boy",
     "gameboy",

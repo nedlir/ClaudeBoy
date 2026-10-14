@@ -26,33 +26,37 @@ It was built against Pokémon Yellow.
 
 ClaudeBoy runs on Linux only, for now.
 
-1. Build the emulator, once. It fetches mGBA 0.10.5's source (about 14 MB,
-   checked against its checksum) and needs `cmake`, a C compiler and `curl`:
+1. Get it and build the emulator, once. The build fetches mGBA 0.10.5's
+   source (about 14 MB, checked against its checksum) and needs `cmake`,
+   `make`, a C compiler and `curl`:
 
    ```
+   git clone https://github.com/nedlir/ClaudeBoy
+   cd ClaudeBoy
    ./scripts/build.sh
    ```
 
-   `/claudeboy` runs this for you if you skip it.
+   `/claudeboy` runs the build for you if you skip it, and runs it again
+   when the emulator's source changes, as after a `git pull`.
 
 2. Load the mod. To try it for one session:
 
    ```
-   claude --plugin-dir ~/Desktop/ClaudeBoy
+   claude --plugin-dir path/to/ClaudeBoy
    ```
 
-   To keep it, install it from this folder, which stays the copy Claude Code
-   runs (after an edit, `/reload-plugins` picks it up):
+   To keep it, install it from that folder, which stays the copy Claude Code
+   runs (after an edit to `hooks/`, `/reload-plugins` picks it up):
 
    ```
-   claude plugin marketplace add ~/Desktop/ClaudeBoy
+   claude plugin marketplace add path/to/ClaudeBoy
    claude plugin install claudeboy@claudeboy
    ```
 
 3. Turn it on with `/claudeboy`. The first time, it asks for a game: pick one
-   it found in your Downloads, Desktop, Documents or Games folder, or type or
-   paste the path to a `.gb` or `.gbc` file. `/claudeboy off` turns it off
-   again.
+   it found in your Downloads, Desktop, Documents or Games folder, your home
+   folder or a `roms` folder, or type or paste the path to a `.gb` or `.gbc`
+   file. `/claudeboy off` turns it off again.
 
 ## Playing
 
@@ -77,13 +81,13 @@ ClaudeBoy's own keys show under the game, a few to a row:
 | Switch to a game from your game library | G, then 1–9 or the arrows and Enter |
 | Sound on or off | M (off at first) |
 | Speed ×1, ×2, ×4 | F |
-| Back to Claude | Esc |
+| Exit, back to Claude | Esc |
 
 The game pauses while O or G is open, and Esc goes back to it. Shift for
 Select works on the console; terminals don't report Shift alone, so in kitty
 and Ghostty Select stays Backspace.
 
-Outside kitty and Ghostty the game plays on a Game Boy in Claude's orange,
+Outside kitty and Ghostty, on a desktop, the game plays on a Game Boy in Claude's orange,
 drawn in pixel art: its D-pad, A, B, Select and Start light up and press in
 as you hold them, and a third button beside them shows the speed. You can
 also click them: hold the mouse on one to hold it, and click the speed button
@@ -175,6 +179,7 @@ pictures through.
 /claudeboy games [n]    list your game library, or play game n
 /claudeboy sound on|off
 /claudeboy display auto|cells|image|window
+/claudeboy help         list these
 ```
 
 ## How it works
@@ -204,12 +209,19 @@ dist/claudeboy-engine info <rom>
 dist/claudeboy-engine script <rom> <saves> <out> 600 tap:start 120 shot:title
 ```
 
+`script` takes no lock on the saves, so give it a `<saves>` folder of its
+own, not one a session plays from.
+
 ## Development
 
 ```
 claude plugin validate .
 claude plugin test .
 ```
+
+The tests run the mod against a stand-in for Claude Code and a fake engine.
+Type checking in an editor needs `.claude-plugin/types/`, which Claude Code
+writes there once it has loaded the mod.
 
 ## Licenses
 

@@ -2,7 +2,6 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-type MockClock = ReturnType<typeof mock.clock>
 
 const ROM = '/home/ada/.local/share/claudeboy/roms/Pokemon Yellow.gb'
 const INFO = '{"title":"POKEMON YELLOW","key":"pokemon-yellow-7d527d62","color":true}'
@@ -64,20 +63,22 @@ type World = {
   control: () => string
   // What the mod keeps across sessions, as every session sees it
   store: Record<string, unknown>
+  // Each command line the mod ran
+  runs: (readonly string[])[]
 }
 
 // Answers everything the mod asks of Claude Code, and plays the engine: it
 // answers each command it finds in the control file, as the real one does.
 function stubClaudeCode(
   on: On,
-  clock: MockClock,
   {
     store = { isOn: true } as Record<string, unknown>,
     env = {} as Record<string, string>,
     isPlaced = (n: number) => n > 0,
-    cells = '100 45 1\n' + CELLS,
     // Another session holds the game's saves, so the engine is turned away
     isBusy = false,
+    // Folders' listings beyond the ROMs folder, by how their path ends
+    folders = {} as Record<string, { name: string; mtimeMs: number }[]>,
   } = {},
 ): World {
   const world: World = {
@@ -92,6 +93,7 @@ function stubClaudeCode(
     toasts: [],
     engine: channel(),
     control: () => world.controls[world.controls.length - 1] ?? '',
+    runs: [],
   }
   const answered = new Set<string>()
   // The store answered live, so a test can change it as another session would
@@ -134,9 +136,14 @@ function stubClaudeCode(
   on('fs.list', ($, e) => ({
     value: e.path.endsWith('/claudeboy/roms')
       ? [{ name: 'Pokemon Yellow.gb', kind: 'file' as const, size: 1048576, mtimeMs: 0, isLink: false }]
-      : [],
+      : (Object.entries(folders).find(([end]) => e.path.endsWith(end))?.[1] ?? []).map((entry) => ({
+          ...entry,
+          kind: 'file' as const,
+          size: 1,
+          isLink: false,
+        })),
   }))
-  on('fs.read', () => ({ value: cells }))
+  on('fs.read', () => ({ value: '100 45 1\n' + CELLS }))
   let isPlayAsked = false
   on('fs.write', ($, e) => {
     world.controls.push(e.text)
@@ -157,7 +164,9 @@ function stubClaudeCode(
     }
     return { value: undefined }
   })
-  on('process.run', ($, e) => ({
+  on('process.run', ($, e) => {
+    world.runs.push(e.argv)
+    return {
     value: {
       exitCode: 0,
       stdout: e.argv.includes(TETRIS) ? TETRIS_INFO : INFO,
@@ -165,7 +174,8 @@ function stubClaudeCode(
       isStdoutTruncated: false,
       isStderrTruncated: false,
     },
-  }))
+  }
+  })
   on('process.spawn', async function* ($, e) {
     world.spawns.push(e.argv)
     world.engine.push('@ready pokemon-yellow-7d527d62 1 POKEMON YELLOW')
@@ -227,7 +237,7 @@ const BAND = {
 
 test('drops in once Claude has worked for two seconds, on the ROM it found', SLOW, async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock)
+  const world = stubClaudeCode(on)
   await startSession($)
 
   await $.turn.start({ turnId: 't1', text: 'refactor auth' })
@@ -245,7 +255,7 @@ test('drops in once Claude has worked for two seconds, on the ROM it found', SLO
 
 test('stays out while ClaudeBoy is off', async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock, { store: { isOn: false } })
+  const world = stubClaudeCode(on, { store: { isOn: false } })
   await startSession($)
 
   await $.turn.start({ turnId: 't1', text: 'refactor auth' })
@@ -256,7 +266,7 @@ test('stays out while ClaudeBoy is off', async ($, on) => {
 
 test('stays out of a turn that ends before the delay', async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock)
+  const world = stubClaudeCode(on)
   await startSession($)
 
   await $.turn.start({ turnId: 't1', text: 'hi' })
@@ -268,7 +278,7 @@ test('stays out of a turn that ends before the delay', async ($, on) => {
 
 test('counts down three seconds when Claude finishes, then pauses the game, which saves it', SLOW, async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock)
+  const world = stubClaudeCode(on)
   await startSession($)
 
   await $.turn.start({ turnId: 't1', text: 'refactor auth' })
@@ -290,7 +300,7 @@ test('counts down three seconds when Claude finishes, then pauses the game, whic
 
 test('hands back at once when Claude asks for permission, and drops in again after', SLOW, async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock)
+  const world = stubClaudeCode(on)
   await startSession($)
 
   await $.turn.start({ turnId: 't1', text: 'clean up' })
@@ -307,7 +317,7 @@ test('hands back at once when Claude asks for permission, and drops in again aft
 
 test("keeps playing while auto mode's classifier answers an ask", SLOW, async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock)
+  const world = stubClaudeCode(on)
   await startSession($)
 
   await $.turn.start({ turnId: 't1', text: 'clean up' })
@@ -322,7 +332,7 @@ test("keeps playing while auto mode's classifier answers an ask", SLOW, async ($
 
 test('hands back at once when Claude asks a question', SLOW, async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock)
+  const world = stubClaudeCode(on)
   await startSession($)
 
   await $.turn.start({ turnId: 't1', text: 'plan it' })
@@ -334,7 +344,7 @@ test('hands back at once when Claude asks a question', SLOW, async ($, on) => {
 
 test('keeps playing when a subagent finishes', SLOW, async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock)
+  const world = stubClaudeCode(on)
   await startSession($)
 
   await $.turn.start({ turnId: 't1', text: 'refactor auth' })
@@ -346,7 +356,7 @@ test('keeps playing when a subagent finishes', SLOW, async ($, on) => {
 
 test('hands back at once when the person interrupts Claude', SLOW, async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock)
+  const world = stubClaudeCode(on)
   await startSession($)
 
   await $.turn.start({ turnId: 't1', text: 'refactor auth' })
@@ -357,7 +367,7 @@ test('hands back at once when the person interrupts Claude', SLOW, async ($, on)
 
 test('draws the newest frame as half-block cells, sized to the pane', SLOW, async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock)
+  const world = stubClaudeCode(on)
   await startSession($)
 
   await $.turn.start({ turnId: 't1', text: 'refactor auth' })
@@ -383,7 +393,7 @@ test('draws the newest frame as half-block cells, sized to the pane', SLOW, asyn
 
 test('in kitty, frames come as pictures in shared memory, drawn at the size shown', SLOW, async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock, { env: { TERM: 'xterm-kitty' } })
+  const world = stubClaudeCode(on, { env: { TERM: 'xterm-kitty' } })
   await startSession($)
 
   await $.turn.start({ turnId: 't1', text: 'refactor auth' })
@@ -404,7 +414,7 @@ test('in kitty, frames come as pictures in shared memory, drawn at the size show
 
 test('the picture follows the pane as it resizes, in the middle at the screen\'s shape', SLOW, async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock, { env: { TERM: 'xterm-kitty' } })
+  const world = stubClaudeCode(on, { env: { TERM: 'xterm-kitty' } })
   await startSession($)
 
   await $.turn.start({ turnId: 't1', text: 'refactor auth' })
@@ -433,7 +443,7 @@ test('the picture follows the pane as it resizes, in the middle at the screen\'s
 
 test('the gamepad: Z holds A, and S then a digit saves to that slot', SLOW, async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock)
+  const world = stubClaudeCode(on)
   await startSession($)
 
   await $.turn.start({ turnId: 't1', text: 'refactor auth' })
@@ -466,7 +476,7 @@ test('the gamepad: Z holds A, and S then a digit saves to that slot', SLOW, asyn
 
 test('a held key counts as held while its repeats keep coming', SLOW, async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock)
+  const world = stubClaudeCode(on)
   await startSession($)
 
   await $.turn.start({ turnId: 't1', text: 'refactor auth' })
@@ -492,7 +502,7 @@ test('a held key counts as held while its repeats keep coming', SLOW, async ($, 
 
 test('/claudeboy save saves a slot while nobody plays', SLOW, async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock)
+  const world = stubClaudeCode(on)
   await startSession($)
 
   const saving = $.command.run({ command: 'claudeboy', args: 'save 3' } as never)
@@ -507,7 +517,7 @@ test('/claudeboy save saves a slot while nobody plays', SLOW, async ($, on) => {
 test('offers a key in a narrow terminal, and pressing it drops in', SLOW, async ($, on) => {
   const clock = mock.clock(on)
   // The pane can't open by itself, but opens when the person asks
-  const world = stubClaudeCode(on, clock, { isPlaced: (n) => n > 1 })
+  const world = stubClaudeCode(on, { isPlaced: (n) => n > 1 })
   await startSession($)
 
   await $.turn.start({ turnId: 't1', text: 'refactor auth' })
@@ -522,7 +532,7 @@ test('offers a key in a narrow terminal, and pressing it drops in', SLOW, async 
 
 test('/claudeboy off hands back and stops the engine', SLOW, async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock)
+  const world = stubClaudeCode(on)
   await startSession($)
 
   await $.turn.start({ turnId: 't1', text: 'refactor auth' })
@@ -541,7 +551,7 @@ test('/claudeboy off hands back and stops the engine', SLOW, async ($, on) => {
 
 test('asks whether to play here when another session is playing the game; 1 takes it', SLOW, async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock, { isBusy: true })
+  const world = stubClaudeCode(on, { isBusy: true })
   await startSession($)
 
   await $.turn.start({ turnId: 't1', text: 'refactor auth' })
@@ -551,22 +561,36 @@ test('asks whether to play here when another session is playing the game; 1 take
   expect(await game.find({ text: /Pokemon Yellow is being played in another Claude Code session/ })).toBeDefined()
   expect(await game.find({ text: /Would you like to play it here\?/ })).toBeDefined()
   expect(world.closes).toBe(0)
+  // 1 and 0 answer it
+  expect((await game.find({ key: 'takeover-yes' }))?.props.hotkey).toBe('1')
+  expect((await game.find({ key: 'takeover-no' }))?.props.hotkey).toBe('0')
 
   await game.press({ key: 'takeover-yes' })
   await clock.settle()
   expect(world.controls.some((line) => /cmds=\d+:takeover/.test(line))).toBe(true)
   expect(await game.find({ text: /Would you like to play it here\?/ })).toBeUndefined()
+  expect(world.control()).toMatch(/^play=1 /)
+})
 
-  // That session let go: the game is here now
+test('the question goes by itself if the other session pauses first', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on, { isBusy: true })
+  await startSession($)
+
+  await $.turn.start({ turnId: 't1', text: 'refactor auth' })
+  await clock.advance(2000)
+  await clock.settle()
+  const game = await $.ui.mount(GAME)
+  expect(await game.find({ text: /Would you like to play it here\?/ })).toBeDefined()
   world.engine.push('@playing')
   await clock.settle()
   expect(await game.find({ text: /Would you like to play it here\?/ })).toBeUndefined()
-  expect(world.control()).toMatch(/^play=1 /)
+  expect(world.controls.some((line) => /cmds=\d+:takeover/.test(line))).toBe(false)
 })
 
 test('0 stays out of the game for the turn, and the next turn asks again', SLOW, async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock, { isBusy: true })
+  const world = stubClaudeCode(on, { isBusy: true })
   await startSession($)
 
   await $.turn.start({ turnId: 't1', text: 'refactor auth' })
@@ -591,7 +615,7 @@ test('0 stays out of the game for the turn, and the next turn asks again', SLOW,
 
 test('a session whose game is taken hands it over and says where it went', SLOW, async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock)
+  const world = stubClaudeCode(on)
   await startSession($)
 
   await $.turn.start({ turnId: 't1', text: 'refactor auth' })
@@ -610,7 +634,7 @@ test('a session whose game is taken hands it over and says where it went', SLOW,
 
 test('F steps the speed up to ×2, then ×4, then back to ×1', SLOW, async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock)
+  const world = stubClaudeCode(on)
   await startSession($)
 
   await $.turn.start({ turnId: 't1', text: 'refactor auth' })
@@ -638,7 +662,7 @@ const WORKING = 'Pokemon Yellow · Claude is working\n' + HINT
 
 test('in a terminal without pictures, the game plays in a drawer, the pane making room', SLOW, async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock, { env: { DISPLAY: ':0' } })
+  const world = stubClaudeCode(on, { env: { DISPLAY: ':0' } })
   await startSession($)
 
   await $.turn.start({ turnId: 't1', text: 'refactor auth' })
@@ -661,7 +685,7 @@ test('in a terminal without pictures, the game plays in a drawer, the pane makin
 
 test('keys typed in the window save to a slot, the title saying so', SLOW, async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock, { env: { DISPLAY: ':0' } })
+  const world = stubClaudeCode(on, { env: { DISPLAY: ':0' } })
   await startSession($)
 
   await $.turn.start({ turnId: 't1', text: 'refactor auth' })
@@ -679,7 +703,7 @@ test('keys typed in the window save to a slot, the title saying so', SLOW, async
 
 test('closing the window pauses the game, and it stays closed for the turn', SLOW, async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock, { env: { DISPLAY: ':0' } })
+  const world = stubClaudeCode(on, { env: { DISPLAY: ':0' } })
   await startSession($)
 
   await $.turn.start({ turnId: 't1', text: 'refactor auth' })
@@ -699,7 +723,7 @@ test('closing the window pauses the game, and it stays closed for the turn', SLO
 
 test('where no window can open, the game plays in the pane', SLOW, async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock, { env: { DISPLAY: ':0' } })
+  const world = stubClaudeCode(on, { env: { DISPLAY: ':0' } })
   await startSession($)
 
   await $.turn.start({ turnId: 't1', text: 'refactor auth' })
@@ -714,7 +738,7 @@ test('where no window can open, the game plays in the pane', SLOW, async ($, on)
 
 test('the pane opens as wide as the drawer, so the transcript moves aside', SLOW, async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock, { env: { DISPLAY: ':0' } })
+  const world = stubClaudeCode(on, { env: { DISPLAY: ':0' } })
   await startSession($)
 
   await $.turn.start({ turnId: 't1', text: 'refactor auth' })
@@ -733,7 +757,7 @@ test('the pane opens as wide as the drawer, so the transcript moves aside', SLOW
 
 test('in a maximized terminal the console is laid over the pane, made wide enough for it', SLOW, async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock, { env: { DISPLAY: ':0' } })
+  const world = stubClaudeCode(on, { env: { DISPLAY: ':0' } })
   await startSession($)
 
   await $.turn.start({ turnId: 't1', text: 'refactor auth' })
@@ -759,7 +783,7 @@ test('in a maximized terminal the console is laid over the pane, made wide enoug
 
 test('the countdown shows on the game; Esc on the console keeps playing, and the next Esc goes back', SLOW, async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock, { env: { DISPLAY: ':0' } })
+  const world = stubClaudeCode(on, { env: { DISPLAY: ':0' } })
   await startSession($)
 
   await $.turn.start({ turnId: 't1', text: 'refactor auth' })
@@ -788,7 +812,7 @@ test('the countdown shows on the game; Esc on the console keeps playing, and the
 
 test('in the pane, Esc goes back to Claude, and the countdown shows on the game', SLOW, async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock)
+  const world = stubClaudeCode(on)
   await startSession($)
 
   await $.turn.start({ turnId: 't1', text: 'refactor auth' })
@@ -807,7 +831,7 @@ test('in the pane, Esc goes back to Claude, and the countdown shows on the game'
 
 test('turning ClaudeBoy on or off in one session reaches the others at their next turn', SLOW, async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock)
+  const world = stubClaudeCode(on)
   await startSession($)
 
   // Another session turned it off: this one stays out
@@ -826,7 +850,7 @@ test('turning ClaudeBoy on or off in one session reaches the others at their nex
 
 test('O opens a game by its path: added to the library, played from then on', SLOW, async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock, { env: { DISPLAY: ':0' } })
+  const world = stubClaudeCode(on, { env: { DISPLAY: ':0' } })
   await startSession($)
 
   await $.turn.start({ turnId: 't1', text: 'refactor auth' })
@@ -855,7 +879,7 @@ test('O opens a game by its path: added to the library, played from then on', SL
 
 test('G lists the games opened; picking one plays it', SLOW, async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock, {
+  const world = stubClaudeCode(on, {
     env: { DISPLAY: ':0' },
     store: {
       isOn: true,
@@ -881,7 +905,7 @@ test('G lists the games opened; picking one plays it', SLOW, async ($, on) => {
 
 test('the first time, ClaudeBoy asks for a game before anything plays', SLOW, async ($, on) => {
   const clock = mock.clock(on)
-  const world = stubClaudeCode(on, clock, { store: {} })
+  const world = stubClaudeCode(on, { store: {} })
   await startSession($)
 
   await $.command.run({ command: 'claudeboy', args: '' } as never)
@@ -894,4 +918,80 @@ test('the first time, ClaudeBoy asks for a game before anything plays', SLOW, as
   await clock.settle()
   expect(world.store.library).toEqual([{ rom: TETRIS, title: 'Tetris' }])
   expect(await game.find({ text: /Ready to play Tetris/ })).toBeDefined()
+})
+
+test('/claudeboy play during the countdown takes the count off the game', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on)
+  await startSession($)
+
+  await $.turn.start({ turnId: 't1', text: 'refactor auth' })
+  await clock.advance(2000)
+  await finishTurn($)
+  expect(world.control()).toContain(' countdown=3')
+  await $.command.run({ command: 'claudeboy', args: 'play' } as never)
+  await clock.settle()
+  expect(world.control()).not.toContain('countdown=')
+  await clock.advance(5000)
+  expect(world.control()).toMatch(/^play=1 /)
+  expect(world.closes).toBe(0)
+})
+
+test('the game doesn\'t drop in behind an open menu, and leaving it closes the pane', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on)
+  await startSession($)
+
+  await $.command.run({ command: 'claudeboy', args: 'open' } as never)
+  await clock.settle()
+  const game = await $.ui.mount(GAME)
+  expect(await game.find({ text: /Open a Game Boy game/ })).toBeDefined()
+  await $.turn.start({ turnId: 't1', text: 'refactor auth' })
+  await clock.advance(3000)
+  expect(world.controls.some((line) => line.startsWith('play=1'))).toBe(false)
+
+  // A game opened while nobody plays: the menu goes, and the pane with it
+  await game.input({ key: 'rom-path', text: TETRIS })
+  await clock.settle()
+  expect(world.store.rom).toBe(TETRIS)
+  expect(world.closes).toBe(1)
+})
+
+test('after a menu the pane asks for a click again: the gamepad is a new one', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on)
+  await startSession($)
+
+  await $.turn.start({ turnId: 't1', text: 'refactor auth' })
+  await clock.advance(2000)
+  const game = await $.ui.mount(GAME)
+  world.engine.push('@cells 1 100 45')
+  await clock.settle()
+  await game.key({ key: 'z', in: 'pad' })
+  await game.advance(16)
+  expect(await game.find({ text: /Claude is working/ })).toBeDefined()
+
+  await game.key({ key: 'g', in: 'pad' })
+  await game.advance(16)
+  await clock.settle()
+  expect(await game.find({ text: /Your game library/ })).toBeDefined()
+  await game.press({ key: 'game-0' })
+  await clock.settle()
+  expect(await game.find({ text: /Click the game to play/ })).toBeDefined()
+})
+
+test('the emulator is built again when its source is newer than it', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on, {
+    folders: {
+      '/dist': [{ name: 'claudeboy-engine', mtimeMs: 1000 }],
+      '/engine': [{ name: 'claudeboy-engine.c', mtimeMs: 2000 }],
+    },
+  })
+  await startSession($)
+
+  await $.turn.start({ turnId: 't1', text: 'refactor auth' })
+  await clock.advance(2000)
+  expect(world.runs.some((argv) => argv[0] === 'bash' && argv[1]?.endsWith('/scripts/build.sh'))).toBe(true)
+  expect(world.control()).toMatch(/^play=1 /)
 })
