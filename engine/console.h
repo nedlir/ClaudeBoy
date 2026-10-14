@@ -10,7 +10,7 @@
 
 #define CONSOLE_SCREEN_WIDTH 160
 #define CONSOLE_SCREEN_HEIGHT 144
-#define CONSOLE_MAX_WIDTH 272
+#define CONSOLE_MAX_WIDTH 274
 #define CONSOLE_MAX_HEIGHT 316
 
 // Hit by a point: the speed button, past the Game Boy's eight

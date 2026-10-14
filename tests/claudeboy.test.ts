@@ -539,7 +539,7 @@ test('stays out for a minute when another session is playing the game', SLOW, as
   expect(world.opens).toBe(2)
 })
 
-test('F steps the speed up to ×2, ×4 and ×8, then back to ×1', SLOW, async ($, on) => {
+test('F steps the speed up to ×2, then ×4, then back to ×1', SLOW, async ($, on) => {
   const clock = mock.clock(on)
   const world = stubClaudeCode(on, clock)
   await startSession($)
@@ -550,12 +550,12 @@ test('F steps the speed up to ×2, ×4 and ×8, then back to ×1', SLOW, async (
   world.engine.push('@cells 1 100 45')
   await clock.settle()
   const speeds: string[] = []
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < 3; i++) {
     await game.key({ key: 'f', in: 'pad' })
     await game.advance(16)
     speeds.push(/ speed=(\d+)/.exec(world.control())?.[1] ?? '?')
   }
-  expect(speeds).toEqual(['2', '4', '8', '1'])
+  expect(speeds).toEqual(['2', '4', '1'])
 })
 
 // The window's title as the engine reads it out of the control line
@@ -674,7 +674,7 @@ test('in a maximized terminal the console is laid over the pane, made wide enoug
   world.engine.push('@drawer 464 1214')
   world.engine.push('@cell 10 22')
   await clock.settle()
-  // The pane asks for room for the wide console at twice its 272 pixels
+  // The pane asks for room for the wide console at twice its 274 pixels
   expect(world.openColumns.at(-1)).toBe(56)
   const game = await $.ui.mount({ ...GAME, props: { ...GAME.props, bodyColumns: 56, scroll: { offset: 0, bodyRows: 25 } } })
   // The box: the pane's body from column 64, below its top row, all but the

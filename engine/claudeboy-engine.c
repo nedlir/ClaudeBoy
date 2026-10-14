@@ -221,7 +221,6 @@ struct Engine {
 	// The game's window, its title, and the buttons held in it
 	struct GameWindow* window;
 	bool isWindowBroken;
-	bool isWindowDismissed;
 	uint32_t windowKeys;
 	char windowTitle[256];
 	// A terminal cell's size as last told to the mod
@@ -1249,7 +1248,7 @@ static void parseControl(char* line, struct Control* control, struct Command* co
 		} else if (!strcmp(token, "sound")) {
 			control->isSoundOn = atoi(value) != 0;
 		} else if (!strcmp(token, "speed")) {
-			control->speed = clampInt(atoi(value), 1, 8);
+			control->speed = clampInt(atoi(value), 1, 4);
 		} else if (!strcmp(token, "countdown")) {
 			control->countdown = clampInt(atoi(value), 0, 9);
 		} else if (!strcmp(token, "overlay")) {
@@ -1454,12 +1453,9 @@ static void tendWindow(struct Engine* engine) {
 	if (!engine->window) {
 		return;
 	}
-	if (!engine->wanted.isPlaying) {
-		engine->isWindowDismissed = false;
-	}
 	layWindow(engine);
 	gameWindowSetSpeed(engine->window, engine->wanted.speed > 0 ? engine->wanted.speed : 1);
-	if (isWanted && engine->isPlaying && !engine->isWindowDismissed) {
+	if (isWanted && engine->isPlaying) {
 		gameWindowShow(engine->window);
 	} else {
 		gameWindowHide(engine->window);
@@ -1479,10 +1475,9 @@ static void tendWindow(struct Engine* engine) {
 		emit("@focus %d", events.focus);
 	}
 	if (events.isClosed) {
-		// Gone at once; the mod pauses the game, which saves it
-		engine->isWindowDismissed = true;
+		// The mod decides: during the countdown Esc keeps the game going, else
+		// it pauses the game, which saves it, and puts the window away
 		engine->windowKeys = 0;
-		gameWindowHide(engine->window);
 		emit("@closed");
 	}
 	if (events.needsDrawing) {

@@ -35,13 +35,13 @@ const STATUS_ROWS = 2
 const SCREEN_WIDTH = 160
 const SCREEN_HEIGHT = 144
 // The engine's wide console, in its own pixels (engine/console.c)
-const WIDE_CONSOLE_WIDTH = 272
+const WIDE_CONSOLE_WIDTH = 274
 // A cell's size in pixels until the terminal says: most fonts are about
 // twice as tall as wide
 const DEFAULT_CELL = { width: 10, height: 20 }
 const MAX_IMAGE_CELLS = 255
 // F steps through these speeds
-const SPEEDS = [1, 2, 4, 8]
+const SPEEDS = [1, 2, 4]
 // Image blits refused in a row before the pane falls back to cells
 const IMAGE_FAILURES_BEFORE_CELLS = 10
 
@@ -63,7 +63,7 @@ const HELP = [
   '  /claudeboy sound on|off',
   '  /claudeboy display auto|cells|image|window',
   '',
-  'In the game: ' + CONTROLS + '. S saves to a slot, L loads one, M turns the sound on or off, F fast-forwards ×2, ×4, ×8, then back.',
+  'In the game: ' + CONTROLS + '. S saves to a slot, L loads one, M turns the sound on or off, F fast-forwards ×2, ×4, then back.',
 ].join('\n')
 
 type Phase = 'idle' | 'waiting' | 'offered' | 'playing' | 'countdown'
@@ -1222,7 +1222,7 @@ export const register: Register = (on) => {
             of its own in other terminals. You're handed back when Claude is done or needs you, and the game is saved
             each time.
           </Text>
-          <Text>{CONTROLS}. S saves to a slot, L loads one, M turns the sound on or off, F fast-forwards ×2, ×4, ×8, then back.</Text>
+          <Text>{CONTROLS}. S saves to a slot, L loads one, M turns the sound on or off, F fast-forwards ×2, ×4, then back.</Text>
           {welcomeStatus ? <Text color={welcomeStatus.startsWith('Ready') ? 'green' : undefined}>{welcomeStatus}</Text> : null}
           <Text dimColor>/claudeboy play opens it now · /claudeboy help lists the rest · /claudeboy off turns it off</Text>
           <Button

@@ -63,7 +63,7 @@ Esc hands you back to Claude, or, during the countdown, keeps you playing.
 | Save to a slot | S, then 1–9 |
 | Load a slot | L, then 1–9 |
 | Sound on or off | M (off at first) |
-| Fast-forward ×2, ×4, ×8, then back | F |
+| Fast-forward ×2, ×4, then back | F |
 
 Outside kitty and Ghostty the game plays on a Game Boy in Claude's orange,
 drawn in pixel art: its D-pad, A, B, Select and Start light up and press in
