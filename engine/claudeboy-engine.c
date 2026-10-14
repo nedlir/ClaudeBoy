@@ -74,7 +74,8 @@ static const char USAGE[] =
 	"        @closed                         the person closed the window (Esc)\n"
 	"        @drawer <width> <desktop-width> the window's width, in pixels\n"
 	"        @cell <width> <height>          a terminal cell, in pixels, where its\n"
-	"                                        grid can be found on the screen\n"
+	"                                        grid can be found on the screen; 0 0\n"
+	"                                        once it can't\n"
 	"        @focus 1|0                      the window got or lost the keys\n"
 	"        @nowindow <words>               no window can open here\n"
 	"        @log <words>, @error <words>\n"
@@ -615,11 +616,7 @@ static bool loadState(struct Engine* engine, const char* slot) {
 }
 
 static int64_t modifiedNs(const struct stat* status) {
-#ifdef __APPLE__
-	return (int64_t) status->st_mtimespec.tv_sec * 1000000000LL + status->st_mtimespec.tv_nsec;
-#else
 	return (int64_t) status->st_mtim.tv_sec * 1000000000LL + status->st_mtim.tv_nsec;
-#endif
 }
 
 // Whether the autosave on disk is another than this engine last wrote or
@@ -1651,6 +1648,7 @@ static void tendWindow(struct Engine* engine) {
 	}
 	layWindow(engine);
 	gameWindowSetSpeed(engine->window, engine->wanted.speed);
+	frontmostSetActive(isWanted && engine->isPlaying);
 	if (!engine->wanted.isPlaying) {
 		engine->hasShownSincePlay = false;
 		engine->isNotePending = false;
@@ -1755,7 +1753,13 @@ static void layWindow(struct Engine* engine) {
 	int left = 0;
 	int top = 0;
 	const bool hasGrid = terminalGrid(engine, &cellWidth, &cellHeight, &left, &top);
-	if (hasGrid && (cellWidth != engine->cellWidth || cellHeight != engine->cellHeight)) {
+	// Found, changed, or lost (@cell 0 0: the terminal doesn't fill the
+	// desktop any more, the console goes to the drawer)
+	if (!hasGrid) {
+		cellWidth = 0;
+		cellHeight = 0;
+	}
+	if (cellWidth != engine->cellWidth || cellHeight != engine->cellHeight) {
 		engine->cellWidth = cellWidth;
 		engine->cellHeight = cellHeight;
 		emit("@cell %d %d", cellWidth, cellHeight);

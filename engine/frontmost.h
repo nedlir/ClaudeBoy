@@ -21,6 +21,8 @@ enum Frontmost {
 // Starts watching, on a thread of its own; once
 void frontmostStart(const char* marker);
 enum Frontmost frontmostState(void);
+// Whether the game is out: the bus is looked at only while it is
+void frontmostSetActive(bool isGameOut);
 // The game is about to show for the first time since play began: the
 // terminal in front now is this session's, if the marker hasn't said which.
 // Answered within a round (30 ms); show the game once it is, so the terminal

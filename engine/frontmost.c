@@ -60,6 +60,9 @@ static atomic_int state = FRONTMOST_UNKNOWN;
 static int ancestors[64];
 static int ancestorCount;
 static atomic_bool isShowNoted = false;
+// The game is out: looked at only then, so a paused engine costs the
+// desktop nothing
+static atomic_bool isActive = false;
 static atomic_bool isNoteAnswered = true;
 // libatspi couldn't be loaded, or the bus reached: nothing will be answered
 static atomic_bool hasFailed = false;
@@ -392,6 +395,12 @@ static void* watch(void* unused) {
 		// Messages from the bus the calls didn't take, handled so they don't pile up
 		for (int i = 0; i < 64 && A.iterate(NULL, 0); i++) {
 		}
+		// The state as last seen stands meanwhile, and is looked at again
+		// within a round of the game coming out
+		if (!atomic_load(&isActive) && !atomic_load(&isShowNoted)) {
+			sleepMs(100);
+			continue;
+		}
 		// The game is about to show: the terminal in front now, before the game
 		// takes the keyboard, is this session's, if nothing said otherwise
 		if (atomic_exchange(&isShowNoted, false)) {
@@ -449,6 +458,10 @@ void frontmostStart(const char* text) {
 	pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED);
 	pthread_create(&thread, &attributes, watch, NULL);
 	pthread_attr_destroy(&attributes);
+}
+
+void frontmostSetActive(bool isGameOut) {
+	atomic_store(&isActive, isGameOut);
 }
 
 void frontmostNoteShown(void) {

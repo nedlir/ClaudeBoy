@@ -113,6 +113,7 @@ function stubClaudeCode(
   on('command.register', () => ({ value: undefined }) as never)
   on('session.start', () => ({ cwd: '/work' }) as never)
   on('session.surfaces', () => ({ value: ['terminal'] }))
+  on('session.cwd', () => ({ value: '/work' }))
   on('ui.open', ($, e) => {
     world.opens += 1
     world.openColumns.push(e.columns)
@@ -1055,4 +1056,28 @@ test('the emulator quits ten minutes after the game was last played', SLOW, asyn
   expect(world.controls.some((line) => /cmds=\d+:quit/.test(line))).toBe(false)
   await clock.advance(10 * 60 * 1000)
   expect(world.controls.some((line) => /cmds=\d+:quit/.test(line))).toBe(true)
+})
+
+test('a game opened by a relative path is kept as the file it names', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on)
+  await startSession($)
+
+  await $.command.run({ command: 'claudeboy', args: 'open games/Tetris.gb' } as never)
+  await clock.settle()
+  expect(world.store.rom).toBe('/work/games/Tetris.gb')
+})
+
+test('turned on with no game to play, ClaudeBoy says so once, not every turn', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on, { store: { isOn: true, library: [] } })
+  await startSession($)
+
+  for (const turnId of ['t1', 't2']) {
+    await $.turn.start({ turnId, text: 'refactor auth' })
+    await clock.advance(2000)
+    await finishTurn($, { turnId })
+  }
+  expect(world.toasts.filter((text) => text.startsWith('ClaudeBoy: No game yet'))).toHaveLength(1)
+  expect(world.opens).toBe(0)
 })

@@ -263,7 +263,7 @@ async function loadGame($: Dollar): Promise<string | null> {
 let firstGame: Promise<void> | null = null
 
 function keepFirstGame($: Dollar): Promise<void> {
-  firstGame ??= moveFirstGame($)
+  firstGame ??= moveFirstGame($).catch(() => {})
   return firstGame
 }
 
@@ -295,7 +295,9 @@ async function readGame($: Dollar, rom: string): Promise<Game | string> {
 async function switchGame($: Dollar, path: string): Promise<string | null> {
   const built = await ensureEngine($)
   if (built) return built
-  const rom = expandHome(path.trim().replace(/^(['"])(.*)\1$/, '$2'))
+  let rom = expandHome(path.trim().replace(/^(['"])(.*)\1$/, '$2'))
+  // Kept in the library as the file it names now, wherever a later session runs
+  if (!rom.startsWith('/')) rom = (await $.session.cwd()).replace(/\/$/, '') + '/' + rom
   if (!ROM_EXTENSIONS.test(rom)) return 'That isn\'t a Game Boy game: open a .gb or .gbc file.'
   if (!(await $.fs.exists(rom))) return 'No file at ' + rom + '.'
   const read = await readGame($, rom)
@@ -333,6 +335,8 @@ function ensureEngine($: Dollar): Promise<string | null> {
 
 // An update that wouldn't build is tried once a session, not at every drop-in
 let isUpdateFailed = false
+// Why a drop-in couldn't play, as last told
+let toldProblem: string | null = null
 
 async function buildEngine($: Dollar): Promise<string | null> {
   const hasEngine = await $.fs.exists(enginePath())
@@ -395,11 +399,21 @@ function armDropIn($: Dollar) {
 }
 
 async function dropIn($: Dollar) {
-  if (phase !== 'waiting' || menu) return
+  if (phase !== 'waiting') return
   timer = null
+  if (menu) {
+    phase = 'idle'
+    return
+  }
   const surfaces = await $.session.surfaces()
-  if (!surfaces.includes('terminal') || (await loadGame($)) !== null || phase !== 'waiting') {
+  const problem = surfaces.includes('terminal') ? await loadGame($) : 'no terminal'
+  if (problem || phase !== 'waiting') {
     if (phase === 'waiting') phase = 'idle'
+    // Turned on but unable to play: said once a session, not at every turn
+    if (problem && problem !== 'no terminal' && problem !== toldProblem) {
+      toldProblem = problem
+      $.ui.toast('ClaudeBoy: ' + problem, { timeoutMs: 8000 })
+    }
     return
   }
   if (pictureMode() === 'window') {
@@ -472,6 +486,7 @@ async function reopenPane($: Dollar, isFocused = false): Promise<boolean> {
 async function changeView($: Dollar): Promise<boolean> {
   forgetPicture()
   hasWindowFocus = false
+  wanted.keys = 0
   // A picture's or cells' size comes from the pane as it draws
   wanted.view = pictureMode() === 'window' ? 'window' : 'none'
   scheduleControl($)
@@ -633,7 +648,8 @@ async function runEngine($: Dollar) {
       }
       const lines = (pending + text).split('\n')
       pending = lines.pop() ?? ''
-      for (const line of lines) onEngineLine($, line)
+      // One given up on (stopEngine) isn't listened to: a new one may play
+      if (engine === child) for (const line of lines) onEngineLine($, line)
     }
   } catch (error) {
     engineError ??= "ClaudeBoy couldn't start its emulator"
@@ -677,13 +693,16 @@ function onEngineLine($: Dollar, line: string) {
       redraw($)
       break
     }
-    case '@cell':
-      // Where the terminal fills the desktop, the engine tells its cells' size
-      cell = { width: Number(words[0]) || 0, height: Number(words[1]) || 0 }
-      hasGrid = cell.width > 0
+    case '@cell': {
+      // Where the terminal fills the desktop, the engine tells its cells'
+      // size; 0 0 once it doesn't (the console goes to the drawer)
+      const [width = 0, height = 0] = words.map(Number)
+      hasGrid = width > 0 && height > 0
+      if (hasGrid) cell = { width, height }
       if (wanted.view === 'window' && isInGame()) void openDrawerPane($)
       redraw($)
       break
+    }
     case '@drawer':
       drawer = { width: Number(words[0]) || 0, workWidth: Number(words[1]) || 0 }
       // Sized now the drawer is: the pane makes room to match
@@ -1165,8 +1184,6 @@ async function onKey($: Dollar, key: string) {
 // Shows a menu in the pane, the game paused under it, the pane taking the
 // keys: typed paths, 1–9, the arrows and Enter reach the menu
 async function openMenu($: Dollar, which: 'open' | 'games') {
-  // A drop-in or offer pending doesn't start the game behind the menu
-  if (phase === 'waiting' || phase === 'offered') cancelDropIn($)
   // The game from before the library in it (which needs the engine, once)
   if (!isLibraryKept) {
     await ensureEngine($)
@@ -1175,6 +1192,8 @@ async function openMenu($: Dollar, which: 'open' | 'games') {
   // An empty library has nothing to pick: open a game instead
   if (which === 'games' && !library.length) which = 'open'
   if (which === 'open') foundRoms = await findRomsNearby($)
+  // A drop-in or offer pending doesn't start the game behind the menu
+  if (phase === 'waiting' || phase === 'offered') cancelDropIn($)
   menu = which
   menuError = null
   picker = null
@@ -1206,8 +1225,9 @@ async function closeMenu($: Dollar) {
   } else if (isWelcomeOpen) {
     showWelcomeStatus($, game ? 'Ready to play ' + game.title + '.' : NO_GAME)
   } else {
-    // Opened while nobody played (/claudeboy open): nothing to go back to
-    await $.ui.close({ id: PANE })
+    // Opened while nobody played (/claudeboy open): nothing to go back to.
+    // Deferred, as this may run inside the ui.close hook for this very pane.
+    $.clock.after(0, () => void $.ui.close({ id: PANE }))
   }
   redraw($)
 }
@@ -1375,7 +1395,8 @@ async function setDisplay($: Dollar, value: string) {
   isWindowBroken = false
   await $.store.set('display', display)
   redraw($)
-  if (isInGame()) await changeView($)
+  // The picture needs the pane (the console plays in the drawer without)
+  if (isInGame() && !(await changeView($)) && pictureMode() !== 'window') await handBack($, '')
   return { text: 'Display ' + value + '.' }
 }
 
@@ -1420,9 +1441,10 @@ export const register: Register = (on) => {
   })
 
   on('session.end', async ($, e, next) => {
-    // Out of the game first (the process may go on, after /clear), so the
-    // engine ending isn't taken for a failure
-    goAway($, '')
+    // Out of the game first, the pane closed (after /clear the process goes
+    // on), so the engine ending isn't taken for a failure
+    if (isInGame() || isWelcomeOpen || menu) await handBack($, '')
+    else goAway($, '')
     await stopEngine($)
     return next(e)
   })
