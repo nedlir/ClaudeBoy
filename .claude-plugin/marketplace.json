@@ -1,0 +1,6 @@
+{
+  "name": "claudeboy",
+  "description": "A Game Boy in a pane while Claude works",
+  "owner": { "name": "ClaudeBoy" },
+  "plugins": [{ "name": "claudeboy", "source": "./" }]
+}

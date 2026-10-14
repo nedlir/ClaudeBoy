@@ -1,0 +1,15 @@
+{
+  "name": "claudeboy",
+  "displayName": "ClaudeBoy",
+  "version": "0.1.0",
+  "description": "Play a Game Boy game while Claude works, saved each time you're handed back",
+  "keywords": [
+    "game boy",
+    "gameboy",
+    "emulator",
+    "game",
+    "mod",
+    "mgba",
+    "pokemon"
+  ]
+}

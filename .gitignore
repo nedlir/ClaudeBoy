@@ -1,0 +1,11 @@
+# Built by scripts/build.sh
+dist/
+.build/
+# Written by Claude Code for the editor
+.claude-plugin/types/
+# Games and saves are yours, not the repository's
+*.gb
+*.gbc
+*.sav
+*.state
+roms/
