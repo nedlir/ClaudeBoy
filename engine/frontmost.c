@@ -6,6 +6,8 @@
 
 #include <dlfcn.h>
 #include <pthread.h>
+#include <stdio.h>
+#include <unistd.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -22,6 +24,10 @@ typedef struct {
 } GError;
 
 enum {
+	ROLE_MENU = 33,
+	ROLE_MENU_BAR = 34,
+	ROLE_POPUP_MENU = 41,
+	ROLE_TOOL_BAR = 63,
 	ROLE_FRAME = 23,
 	ROLE_PAGE_TAB = 37,
 	ROLE_TERMINAL = 60,
@@ -36,6 +42,7 @@ static struct {
 	AtspiAccessible* (*childAt)(AtspiAccessible*, int, GError**);
 	AtspiAccessible* (*parent)(AtspiAccessible*, GError**);
 	int (*role)(AtspiAccessible*, GError**);
+	unsigned (*processId)(AtspiAccessible*, GError**);
 	AtspiStateSet* (*stateSet)(AtspiAccessible*);
 	int (*contains)(AtspiStateSet*, int);
 	void (*clearCache)(AtspiAccessible*);
@@ -48,7 +55,13 @@ static struct {
 } A;
 
 static atomic_int state = FRONTMOST_UNKNOWN;
+// This process's ancestors: the terminal running the session is one of them
+// (GNOME Terminal's server, Konsole), so its windows are the ones to watch
+static int ancestors[64];
+static int ancestorCount;
 static atomic_bool isShowNoted = false;
+static atomic_bool isNoteAnswered = true;
+static atomic_bool isWatching = false;
 static char marker[128];
 
 static void sleepMs(int ms) {
@@ -74,6 +87,7 @@ static bool load(void) {
 		{ atspi, "atspi_accessible_get_child_at_index", (void**) &A.childAt },
 		{ atspi, "atspi_accessible_get_parent", (void**) &A.parent },
 		{ atspi, "atspi_accessible_get_role", (void**) &A.role },
+		{ atspi, "atspi_accessible_get_process_id", (void**) &A.processId },
 		{ atspi, "atspi_accessible_get_state_set", (void**) &A.stateSet },
 		{ atspi, "atspi_state_set_contains", (void**) &A.contains },
 		{ atspi, "atspi_accessible_clear_cache", (void**) &A.clearCache },
@@ -122,6 +136,48 @@ static bool hasState(AtspiAccessible* node, int which) {
 	return has;
 }
 
+static void readAncestors(void) {
+	int pid = getppid();
+	while (pid > 1 && ancestorCount < 64) {
+		ancestors[ancestorCount++] = pid;
+		char path[64];
+		snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+		FILE* stat = fopen(path, "r");
+		if (!stat) {
+			break;
+		}
+		// "pid (name) state ppid ...": the name may hold spaces, so after its ')'
+		char line[512];
+		const char* after = fgets(line, sizeof(line), stat) ? strrchr(line, ')') : NULL;
+		fclose(stat);
+		int parent = 0;
+		if (!after || sscanf(after + 1, " %*c %d", &parent) != 1) {
+			break;
+		}
+		pid = parent;
+	}
+}
+
+// An app on the bus that's one of this process's ancestors
+static bool isOurApp(AtspiAccessible* app) {
+	GError* error = NULL;
+	const int pid = (int) A.processId(app, &error);
+	if (failed(error)) {
+		return false;
+	}
+	for (int i = 0; i < ancestorCount; i++) {
+		if (ancestors[i] == pid) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// Menus and tool bars hold no terminal, and many nodes: not looked through
+static bool isMenu(int role) {
+	return role == ROLE_MENU || role == ROLE_MENU_BAR || role == ROLE_POPUP_MENU || role == ROLE_TOOL_BAR;
+}
+
 // Whether a terminal's screen shows the marker
 static bool showsMarker(AtspiAccessible* terminal) {
 	GError* error = NULL;
@@ -144,8 +200,12 @@ static AtspiAccessible* findTerminal(AtspiAccessible* node, int depth) {
 	if (depth > 12) {
 		return NULL;
 	}
-	if (roleOf(node) == ROLE_TERMINAL) {
+	const int role = roleOf(node);
+	if (role == ROLE_TERMINAL) {
 		return showsMarker(node) ? node : NULL;
+	}
+	if (isMenu(role)) {
+		return NULL;
 	}
 	GError* error = NULL;
 	const int count = A.childCount(node, &error);
@@ -168,7 +228,10 @@ static AtspiAccessible* findTerminal(AtspiAccessible* node, int depth) {
 	return NULL;
 }
 
-static AtspiAccessible* findOurs(void) {
+// The terminal showing the marker, among the apps that are this process's
+// ancestors, or with `isAnyApp` all of them (a session run through
+// something between, as a daemon)
+static AtspiAccessible* findOurs(bool isAnyApp) {
 	AtspiAccessible* desktop = A.getDesktop(0);
 	if (!desktop) {
 		return NULL;
@@ -182,7 +245,9 @@ static AtspiAccessible* findOurs(void) {
 			error = NULL;
 			continue;
 		}
-		found = findTerminal(app, 0);
+		if (isAnyApp || isOurApp(app)) {
+			found = findTerminal(app, 0);
+		}
 		if (found != app) {
 			A.unref(app);
 		}
@@ -201,7 +266,7 @@ static AtspiAccessible* findShownTerminal(AtspiAccessible* node, int depth) {
 	if (role == ROLE_TERMINAL) {
 		return node;
 	}
-	if (role < 0 || (role == ROLE_PAGE_TAB && !hasState(node, STATE_SELECTED))) {
+	if (role < 0 || isMenu(role) || (role == ROLE_PAGE_TAB && !hasState(node, STATE_SELECTED))) {
 		return NULL;
 	}
 	GError* error = NULL;
@@ -240,6 +305,10 @@ static AtspiAccessible* findActiveTerminal(void) {
 			error = NULL;
 			continue;
 		}
+		if (!isOurApp(app)) {
+			A.unref(app);
+			continue;
+		}
 		const int windows = A.childCount(app, &error);
 		for (int j = 0; !failed(error) && j < windows && j < 32 && !found; j++) {
 			AtspiAccessible* window = A.childAt(app, j, &error);
@@ -261,37 +330,45 @@ static AtspiAccessible* findActiveTerminal(void) {
 	return found;
 }
 
-// In front: the window holding the terminal is the active one, and the tab
-// holding it, if it's in one, the tab shown. -1 when the terminal is gone.
-static int inFront(AtspiAccessible* terminal) {
+// The window holding a terminal, and the tab holding it if it's in one:
+// references the caller lets go of. False when the terminal is gone.
+static bool locate(AtspiAccessible* terminal, AtspiAccessible** frame, AtspiAccessible** tab) {
+	*frame = NULL;
+	*tab = NULL;
 	GError* error = NULL;
-	bool isTabShown = true;
 	AtspiAccessible* node = A.parent(terminal, &error);
-	if (failed(error) || !node) {
-		return -1;
-	}
-	for (int depth = 0; node && depth < 16; depth++) {
+	for (int depth = 0; !failed(error) && node && depth < 16; depth++) {
 		const int role = roleOf(node);
 		if (role < 0) {
-			A.unref(node);
-			return -1;
-		}
-		if (role == ROLE_PAGE_TAB && !hasState(node, STATE_SELECTED)) {
-			isTabShown = false;
+			break;
 		}
 		if (role == ROLE_FRAME) {
-			const bool isActive = hasState(node, STATE_ACTIVE);
-			A.unref(node);
-			return isTabShown && isActive;
+			*frame = node;
+			return true;
 		}
 		AtspiAccessible* up = A.parent(node, &error);
-		A.unref(node);
-		node = failed(error) ? NULL : up;
+		if (role == ROLE_PAGE_TAB && !*tab) {
+			*tab = node;
+		} else {
+			A.unref(node);
+		}
+		node = up;
 	}
 	if (node) {
 		A.unref(node);
 	}
-	return -1;
+	if (*tab) {
+		A.unref(*tab);
+		*tab = NULL;
+	}
+	return false;
+}
+
+static void letGo(AtspiAccessible** node) {
+	if (*node) {
+		A.unref(*node);
+		*node = NULL;
+	}
 }
 
 static void* watch(void* unused) {
@@ -299,60 +376,59 @@ static void* watch(void* unused) {
 	if (!load()) {
 		return NULL;
 	}
-	// This session's terminal, and whether the marker said so; until it's
-	// found, the terminal in front as of the last look, which is this
-	// session's when the game first shows: the person just started Claude
-	// working there
+	readAncestors();
+	// This session's terminal, its window and its tab, and whether the
+	// marker said so; until it's found, the terminal in front when the game
+	// first shows: the person just started Claude working there
 	AtspiAccessible* terminal = NULL;
+	AtspiAccessible* frame = NULL;
+	AtspiAccessible* tab = NULL;
 	bool isMarked = false;
-	AtspiAccessible* lastInFront = NULL;
+	atomic_store(&isWatching, true);
 	for (int round = 0;; round++) {
 		// Messages from the bus the calls didn't take, handled so they don't pile up
 		for (int i = 0; i < 64 && A.iterate(NULL, 0); i++) {
 		}
-		// The marker settles it: looked for while it hasn't, and checked now
-		// and then, in case the pane moved to another terminal. A terminal
-		// once found is kept while the marker shows nowhere else.
-		if (isMarked ? round % 20 == 0 && !showsMarker(terminal) : round % 7 == 0) {
-			AtspiAccessible* marked = findOurs();
+		// The game is about to show: the terminal in front now, before the game
+		// takes the keyboard, is this session's, if nothing said otherwise
+		if (atomic_exchange(&isShowNoted, false)) {
+			if (!terminal) {
+				terminal = findActiveTerminal();
+			}
+			atomic_store(&isNoteAnswered, true);
+		}
+		// The marker settles it: looked for while it hasn't (in every app now
+		// and then), and checked now and then, in case the pane moved to
+		// another terminal. A terminal once found is kept while the marker
+		// shows nowhere else.
+		if (isMarked ? round % 60 == 0 && !showsMarker(terminal) : round % 60 == 0) {
+			AtspiAccessible* marked = findOurs(round % 300 == 0);
 			if (marked) {
-				if (terminal) {
-					A.unref(terminal);
-				}
+				letGo(&terminal);
+				letGo(&frame);
+				letGo(&tab);
 				terminal = marked;
 				isMarked = true;
 			}
 		}
-		if (!terminal) {
-			if (atomic_exchange(&isShowNoted, false) && lastInFront) {
-				terminal = lastInFront;
-				lastInFront = NULL;
-			} else {
-				AtspiAccessible* inFront = findActiveTerminal();
-				if (inFront) {
-					if (lastInFront) {
-						A.unref(lastInFront);
-					}
-					lastInFront = inFront;
-				}
+		// Its window and tab, found again now and then: a tab can be dragged
+		// to another window
+		if (terminal && (!frame || round % 30 == 0)) {
+			letGo(&frame);
+			letGo(&tab);
+			if (!locate(terminal, &frame, &tab)) {
+				// Gone: its tab closed
+				letGo(&terminal);
+				isMarked = false;
 			}
 		}
 		if (!terminal) {
 			atomic_store(&state, FRONTMOST_UNKNOWN);
-			sleepMs(100);
-			continue;
-		}
-		const int front = inFront(terminal);
-		if (front < 0) {
-			// Gone: its tab closed
-			A.unref(terminal);
-			terminal = NULL;
-			isMarked = false;
-			atomic_store(&state, FRONTMOST_UNKNOWN);
 		} else {
-			atomic_store(&state, front ? FRONTMOST_IN_FRONT : FRONTMOST_BEHIND);
+			const bool isFront = hasState(frame, STATE_ACTIVE) && (!tab || hasState(tab, STATE_SELECTED));
+			atomic_store(&state, isFront ? FRONTMOST_IN_FRONT : FRONTMOST_BEHIND);
 		}
-		sleepMs(100);
+		sleepMs(30);
 	}
 	return NULL;
 }
@@ -373,7 +449,15 @@ void frontmostStart(const char* text) {
 }
 
 void frontmostNoteShown(void) {
+	if (!atomic_load(&isWatching)) {
+		return;
+	}
+	atomic_store(&isNoteAnswered, false);
 	atomic_store(&isShowNoted, true);
+}
+
+bool frontmostIsNoteAnswered(void) {
+	return atomic_load(&isNoteAnswered);
 }
 
 enum Frontmost frontmostState(void) {

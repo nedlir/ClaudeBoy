@@ -32,6 +32,8 @@ struct GameWindowEvents {
 	bool needsDrawing;
 	// 1 when the window got the keyboard, 0 when it lost it, -1 neither
 	int focus;
+	// Clicked, with any button: the keyboard is coming to it
+	bool wasClicked;
 };
 
 // Opens the drawer, unmapped, docked to the right edge of the desktop, the

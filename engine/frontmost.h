@@ -10,6 +10,8 @@
 #ifndef CLAUDEBOY_FRONTMOST_H
 #define CLAUDEBOY_FRONTMOST_H
 
+#include <stdbool.h>
+
 enum Frontmost {
 	FRONTMOST_UNKNOWN = -1,
 	FRONTMOST_BEHIND = 0,
@@ -20,7 +22,10 @@ enum Frontmost {
 void frontmostStart(const char* marker);
 enum Frontmost frontmostState(void);
 // The game is about to show for the first time since play began: the
-// terminal in front now is this session's, if the marker hasn't said which
+// terminal in front now is this session's, if the marker hasn't said which.
+// Answered within a round (30 ms); show the game once it is, so the terminal
+// is looked at before the game takes the keyboard from it.
 void frontmostNoteShown(void);
+bool frontmostIsNoteAnswered(void);
 
 #endif

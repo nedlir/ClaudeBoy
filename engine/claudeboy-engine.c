@@ -241,8 +241,12 @@ struct Engine {
 	// it again (the terminal back in front) leaves the keyboard where it is
 	bool hasWindowFocus;
 	bool hasShownSincePlay;
-	// Since when the terminal has been behind, or 0
-	int64_t behindSinceNs;
+	// Until when the window stays though the terminal is behind: it was just
+	// clicked, or shown taking the keyboard, which it's about to get
+	int64_t keepUntilNs;
+	// Asked which terminal is in front, before first showing, and when
+	bool isNotePending;
+	int64_t noteSinceNs;
 	uint32_t windowKeys;
 	char windowTitle[256];
 	// A terminal cell's size as last told to the mod
@@ -1584,23 +1588,31 @@ static void tendWindow(struct Engine* engine) {
 	gameWindowSetSpeed(engine->window, engine->wanted.speed > 0 ? engine->wanted.speed : 1);
 	if (!engine->wanted.isPlaying) {
 		engine->hasShownSincePlay = false;
+		engine->isNotePending = false;
 	}
 	// Away from the terminal (another window, another tab), the window goes
-	// too, unless it has the keyboard itself. Clicking the window puts the
-	// terminal behind a moment before the window gets the keyboard: so only
-	// once it's been behind a while.
-	if (frontmostState() == FRONTMOST_BEHIND && !engine->hasWindowFocus) {
-		if (!engine->behindSinceNs) {
-			engine->behindSinceNs = monotonicNs();
-		}
-	} else {
-		engine->behindSinceNs = 0;
-	}
-	const bool isTerminalBehind = engine->behindSinceNs && monotonicNs() - engine->behindSinceNs > 250000000LL;
-	if (isWanted && engine->isPlaying && !isTerminalBehind) {
-		if (!engine->hasShownSincePlay) {
+	// at once, unless it has the keyboard itself, or is about to: clicking it
+	// puts the terminal behind a moment before it gets the keyboard
+	const bool isTerminalBehind = frontmostState() == FRONTMOST_BEHIND && !engine->hasWindowFocus &&
+	                              monotonicNs() > engine->keepUntilNs;
+	// Before first showing, the terminal in front is noted, which takes a
+	// moment: held back for it, a sixth of a second at most
+	bool isHeldBack = false;
+	if (isWanted && engine->isPlaying && !isTerminalBehind && !engine->hasShownSincePlay) {
+		if (!engine->isNotePending) {
 			frontmostNoteShown();
+			engine->isNotePending = true;
+			engine->noteSinceNs = monotonicNs();
 		}
+		isHeldBack = !frontmostIsNoteAnswered() && monotonicNs() - engine->noteSinceNs < 150000000LL;
+		if (!isHeldBack) {
+			engine->isNotePending = false;
+			engine->keepUntilNs = monotonicNs() + 600000000LL;
+		}
+	}
+	if (isHeldBack) {
+		// Not shown yet
+	} else if (isWanted && engine->isPlaying && !isTerminalBehind) {
 		gameWindowShow(engine->window, !engine->hasShownSincePlay);
 		engine->hasShownSincePlay = true;
 	} else {
@@ -1618,6 +1630,9 @@ static void tendWindow(struct Engine* engine) {
 	engine->windowKeys = events.keys;
 	for (int i = 0; i < events.typedCount; i++) {
 		emit("@key %c", events.typed[i]);
+	}
+	if (events.wasClicked) {
+		engine->keepUntilNs = monotonicNs() + 300000000LL;
 	}
 	if (events.focus >= 0) {
 		engine->hasWindowFocus = events.focus == 1;

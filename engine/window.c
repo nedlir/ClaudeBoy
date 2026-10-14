@@ -973,6 +973,9 @@ void gameWindowPump(struct GameWindow* window, struct GameWindowEvents* events) 
 		}
 		case ButtonPress:
 		case ButtonRelease: {
+			if (event.type == ButtonPress) {
+				events->wasClicked = true;
+			}
 			if (event.xbutton.button != 1 || window->scale < 1) {
 				break;
 			}
