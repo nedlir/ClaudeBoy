@@ -9,7 +9,7 @@
 #include <stdint.h>
 
 // The Game Boy's screen, and the console around it, in its own pixels.
-// hooks/register.tsx sizes the pane for CONSOLE_WIDTH (WIDE_CONSOLE_WIDTH).
+// hooks/register.tsx keeps CONSOLE_WIDTH too, to size the pane for it.
 #define CONSOLE_SCREEN_WIDTH 160
 #define CONSOLE_SCREEN_HEIGHT 144
 #define CONSOLE_WIDTH 272

@@ -17,7 +17,7 @@ fail() {
   exit 1
 }
 
-for tool in cmake make cc tar; do
+for tool in cmake make cc tar flock; do
   command -v "$tool" >/dev/null || fail "ClaudeBoy's build needs $tool"
 done
 
@@ -26,6 +26,9 @@ sha256() {
 }
 
 mkdir -p "$BUILD" "$ROOT/dist"
+# One build at a time: sessions that find the source newer all start one
+exec 9>"$BUILD/.lock"
+flock 9
 # Unpacked whole, or not at all: a stamp written last
 if [ ! -f "$SOURCE/.unpacked" ]; then
   archive="$BUILD/mgba-$MGBA_VERSION.tar.gz"

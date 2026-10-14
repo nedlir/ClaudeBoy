@@ -77,6 +77,8 @@ function stubClaudeCode(
     isPlaced = (n: number) => n > 0,
     // Another session holds the game's saves, so the engine is turned away
     isBusy = false,
+    // How a picture's blit is answered: drawn, or refused
+    blit = (): Record<string, unknown> => ({}),
     // Folders' listings beyond the ROMs folder, by how their path ends
     folders = {} as Record<string, { name: string; mtimeMs: number }[]>,
   } = {},
@@ -130,7 +132,7 @@ function stubClaudeCode(
   on('ui.log', () => ({ value: undefined }))
   on('ui.blit', ($, e) => {
     world.blits.push(e)
-    return { value: {} }
+    return { value: blit() }
   })
   on('fs.exists', () => ({ value: true }))
   on('fs.list', ($, e) => ({
@@ -315,32 +317,33 @@ test('hands back at once when Claude asks for permission, and drops in again aft
   expect(world.spawns.length).toBe(1)
 })
 
-test("keeps playing while auto mode's classifier answers an ask", SLOW, async ($, on) => {
+test('keeps playing through a tool call no permission dialog interrupts, as in auto mode', SLOW, async ($, on) => {
   const clock = mock.clock(on)
   const world = stubClaudeCode(on)
   await startSession($)
 
   await $.turn.start({ turnId: 't1', text: 'clean up' })
   await clock.advance(2000)
-  // An ask that no dialog follows
-  await $.tool.check({ tool: 'Bash', input: { command: 'rm -rf build' }, tool_use_id: 'u1' } as never)
+  // The classifier answered: the call runs, and no dialog was raised
   await $.tool.call({ tool: 'Bash', command: 'rm -rf build' } as never)
   await clock.advance(1000)
   expect(world.closes).toBe(0)
   expect(world.control()).toMatch(/^play=1 /)
 })
 
-test('hands back at once when Claude asks a question', SLOW, async ($, on) => {
-  const clock = mock.clock(on)
-  const world = stubClaudeCode(on)
-  await startSession($)
+for (const tool of ['AskUserQuestion', 'ExitPlanMode']) {
+  test('hands back at once when Claude puts a question or a plan to the person: ' + tool, SLOW, async ($, on) => {
+    const clock = mock.clock(on)
+    const world = stubClaudeCode(on)
+    await startSession($)
 
-  await $.turn.start({ turnId: 't1', text: 'plan it' })
-  await clock.advance(2000)
-  void $.tool.call({ tool: 'AskUserQuestion', questions: [] } as never)
-  await clock.settle()
-  expect(world.closes).toBe(1)
-})
+    await $.turn.start({ turnId: 't1', text: 'plan it' })
+    await clock.advance(2000)
+    void $.tool.call({ tool, questions: [], plan: '' } as never)
+    await clock.settle()
+    expect(world.closes).toBe(1)
+  })
+}
 
 test('keeps playing when a subagent finishes', SLOW, async ($, on) => {
   const clock = mock.clock(on)
@@ -611,6 +614,8 @@ test('0 stays out of the game for the turn, and the next turn asks again', SLOW,
   await clock.advance(2000)
   await clock.settle()
   expect(world.opens).toBeGreaterThan(opens)
+  await game.redraw()
+  expect(await game.find({ text: /Would you like to play it here\?/ })).toBeDefined()
 })
 
 test('a session whose game is taken hands it over and says where it went', SLOW, async ($, on) => {
@@ -626,6 +631,10 @@ test('a session whose game is taken hands it over and says where it went', SLOW,
   await clock.settle()
   expect(world.toasts).toContain('Pokemon Yellow moved to another Claude Code session.')
   expect(world.control()).toMatch(/^play=0 /)
+  // Saved as it went: no second toast saying so
+  world.engine.push('@paused')
+  await clock.settle()
+  expect(world.toasts).toHaveLength(1)
   // Not back for the rest of this turn
   await $.tool.call({ tool: 'Bash', command: 'ls' } as never)
   await clock.advance(5000)
@@ -810,7 +819,7 @@ test('the countdown shows on the game; Esc on the console keeps playing, and the
   expect(world.closes).toBe(1)
 })
 
-test('in the pane, Esc goes back to Claude, and the countdown shows on the game', SLOW, async ($, on) => {
+test('in the pane, Esc can close it, and the countdown runs on the game', SLOW, async ($, on) => {
   const clock = mock.clock(on)
   const world = stubClaudeCode(on)
   await startSession($)
@@ -994,4 +1003,56 @@ test('the emulator is built again when its source is newer than it', SLOW, async
   await clock.advance(2000)
   expect(world.runs.some((argv) => argv[0] === 'bash' && argv[1]?.endsWith('/scripts/build.sh'))).toBe(true)
   expect(world.control()).toMatch(/^play=1 /)
+})
+
+test('a terminal that refuses pictures gets the game drawn another way', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on, { env: { TERM: 'xterm-kitty' }, blit: () => ({ deny: 'unsupported' }) })
+  await startSession($)
+
+  await $.turn.start({ turnId: 't1', text: 'refactor auth' })
+  await clock.advance(2000)
+  world.engine.push('@term 200 50 2000 1100')
+  await clock.settle()
+  const game = await $.ui.mount(GAME)
+  expect(world.control()).toContain('view=image:')
+  // The first is drawn with the pane; ten more come as blits, all refused
+  for (let i = 0; i <= 10; i++) {
+    world.engine.push('@frame /claudeboy-7-' + i + ' 1000 902')
+    await clock.settle()
+  }
+  await game.redraw()
+  // No desktop here: cells in the pane
+  expect(world.control()).toContain('view=cells:')
+})
+
+test('an emulator that stops mid-game says so and stays out for the turn', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on)
+  await startSession($)
+
+  await $.turn.start({ turnId: 't1', text: 'refactor auth' })
+  await clock.advance(2000)
+  world.engine.exit()
+  await clock.settle()
+  expect(world.toasts).toContain("ClaudeBoy's emulator stopped")
+  expect(world.closes).toBe(1)
+  const spawns = world.spawns.length
+  await $.tool.call({ tool: 'Bash', command: 'ls' } as never)
+  await clock.advance(5000)
+  expect(world.spawns.length).toBe(spawns)
+})
+
+test('the emulator quits ten minutes after the game was last played', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on)
+  await startSession($)
+
+  await $.turn.start({ turnId: 't1', text: 'refactor auth' })
+  await clock.advance(2000)
+  await finishTurn($)
+  await clock.advance(3000)
+  expect(world.controls.some((line) => /cmds=\d+:quit/.test(line))).toBe(false)
+  await clock.advance(10 * 60 * 1000)
+  expect(world.controls.some((line) => /cmds=\d+:quit/.test(line))).toBe(true)
 })

@@ -861,8 +861,10 @@ void gameWindowHide(struct GameWindow* window, bool isInstant) {
 	if (window->fade < 0) {
 		return;
 	}
+	// Fading in: fade out from as far as it got, as gameWindowShow does
+	const long long done = window->fade > 0 ? FADE_MS - (nowMs() - window->fadeStartMs) : 0;
 	window->fade = -1;
-	window->fadeStartMs = nowMs();
+	window->fadeStartMs = nowMs() - (done > 0 ? done : 0);
 }
 
 // Steps a fade along: called with every pump
@@ -958,6 +960,8 @@ void gameWindowPump(struct GameWindow* window, struct GameWindowEvents* events) 
 				window->pressed[keycode] = false;
 				if (button >= 0) {
 					window->keys &= ~(1u << button);
+					// The console shows it let go, still screen or not
+					window->needsDrawing = true;
 				}
 				break;
 			}
@@ -971,6 +975,7 @@ void gameWindowPump(struct GameWindow* window, struct GameWindowEvents* events) 
 				events->isClosed = true;
 			} else if (button >= 0) {
 				window->keys |= 1u << button;
+				window->needsDrawing = true;
 			} else if (((symbol >= 'a' && symbol <= 'z') || (symbol >= '0' && symbol <= '9')) &&
 			           events->typedCount < WINDOW_TYPED_MAX) {
 				events->typed[events->typedCount++] = (char) symbol;
@@ -1015,6 +1020,7 @@ void gameWindowPump(struct GameWindow* window, struct GameWindowEvents* events) 
 			window->isSpeedHeld = false;
 			memset(window->pressed, 0, sizeof(window->pressed));
 			events->focus = 0;
+			window->needsDrawing = true;
 			break;
 		case ConfigureNotify:
 			if (event.xconfigure.width != window->width || event.xconfigure.height != window->height) {

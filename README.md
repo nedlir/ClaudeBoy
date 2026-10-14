@@ -9,13 +9,16 @@ hands you back when it's done. Everything runs on your machine: the emulator is
 [mGBA](https://mgba.io)'s Game Boy core in a small process of its own, and there's
 no server or account.
 
-When Claude has been working for two seconds, a pane opens beside the
-transcript with your game, right where you left it. When Claude finishes, a
-three-second countdown runs on the game's screen, then the game pauses,
-**saves itself**, and you're handed back. Press Esc during the countdown to
-stay in the game; press Esc again when you're ready to go back to Claude. If Claude needs you, for a permission prompt or a question,
-you're handed back at once and dropped in again after you answer. In auto mode
-the classifier answers most prompts, so play goes on through those.
+When Claude has been working for two seconds, a pane opens with your game,
+right where you left it: beside the transcript in fullscreen, above the
+prompt otherwise. When Claude finishes, a three-second countdown runs on the
+game's screen, then the game pauses, **saves itself**, and you're handed
+back. Press Esc during the countdown to stay in the game; press Esc again
+when you're ready to go back to Claude. If Claude needs you, for a permission
+prompt or a question, you're handed back at once and dropped in again after
+you answer. In auto mode the classifier answers most prompts, so play goes on
+through those. (Where an organization manages Claude Code's settings,
+permission prompts may not hand you back.)
 
 Any Game Boy or Game Boy Color game works (`.gb`, `.gbc`). You open the ones
 you own, and ClaudeBoy keeps them in a game library to switch between, each
@@ -28,7 +31,7 @@ ClaudeBoy runs on Linux only, for now.
 
 1. Get it and build the emulator, once. The build fetches mGBA 0.10.5's
    source (about 14 MB, checked against its checksum) and needs `cmake`,
-   `make`, a C compiler and `curl`:
+   `make`, a C compiler, `tar` and `curl`:
 
    ```
    git clone https://github.com/nedlir/ClaudeBoy
@@ -84,14 +87,14 @@ ClaudeBoy's own keys show under the game, a few to a row:
 | Exit, back to Claude | Esc |
 
 The game pauses while O or G is open, and Esc goes back to it. Shift for
-Select works on the console; terminals don't report Shift alone, so in kitty
-and Ghostty Select stays Backspace.
+Select works on the console; terminals don't report Shift alone, so when the
+game is in the pane, Select is Backspace.
 
-Outside kitty and Ghostty, on a desktop, the game plays on a Game Boy in Claude's orange,
-drawn in pixel art: its D-pad, A, B, Select and Start light up and press in
-as you hold them, and a third button beside them shows the speed. You can
-also click them: hold the mouse on one to hold it, and click the speed button
-to step the speed as F does.
+Outside kitty and Ghostty, on a desktop, the game plays on a Game Boy in
+Claude's orange, drawn in pixel art: its D-pad, A, B, Select and Start light
+up and press in as you hold them, and a third button beside them shows the
+speed. You can also click them: hold the mouse on one to hold it, and click
+the speed button to step the speed as F does.
 
 The game's window sees keys as any game does. Terminals, though, report key
 presses but not releases, so in the pane a lone press is a short tap, and a
@@ -112,7 +115,8 @@ delay in your desktop's settings shortens that stop.
   it was.
 - **In-game saves** go to a regular battery save that other emulators read.
 
-Everything lives in `~/.local/share/claudeboy/saves/<game>/`: `battery.sav`,
+Everything lives in `~/.local/share/claudeboy/saves/<game>/` (or under
+`$XDG_DATA_HOME/claudeboy` when that's set): `battery.sav`,
 `auto.state` and `slot1.state` to `slot9.state`. To bring a save from another
 emulator, put its `.sav` there as `battery.sav` and delete `auto.state`, if
 there is one: an autosave carries the in-game save it was made with, and
@@ -160,11 +164,11 @@ rest of the turn.
 - **With no desktop**, as over SSH: in the pane, drawn with colored
   half-block characters, two pixels per cell. Small panes look blocky.
 
-`/claudeboy display auto|image|window|cells` overrides the choice, and
+`/claudeboy display auto|cells|image|window` overrides the choice, and
 `CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1` tells Claude Code to send pictures to a
 terminal it doesn't recognize. kitty is one install away on Ubuntu:
-`sudo apt install kitty`. Don't run `claude` inside tmux, which passes no
-pictures through.
+`sudo apt install kitty`. tmux passes no pictures through: inside it the
+game plays on the console or in text instead.
 
 ## Commands
 
@@ -189,18 +193,20 @@ permission prompts), opens the pane, and starts the engine. The engine,
 `engine/claudeboy-engine.c`, runs the game at the Game Boy's 59.7 frames a
 second. Every frame it reads a one-line control file the mod rewrites (play or
 pause, held buttons, the picture's size, commands), and it reports on stdout.
-Each frame goes to a file in `$XDG_RUNTIME_DIR` as the cells of a `Raster`, or
-in kitty and Ghostty into shared memory for an `Image`, rendered at the box's
-size in pixels. The mod paints it in place. The engine also reads the
-terminal's size, in pixels too where the terminal reports it, so the mod can
-refit the picture whenever the terminal changes. `hooks/gamepad.tsx` runs over
-the picture and turns key presses into held buttons. Other terminals get the
-engine's own window (`engine/window.c`) with the console drawn around the
-game (`engine/console.c`). The engine loads `libX11` the first
-time the window opens and reads the buttons straight from the window. Keys
-that aren't the Game Boy's, like S, L, O, G, M and F, go up to the mod, which sends
-back the window's title. Sound, when on, is played through `aplay`, `pacat`
-or `ffplay`.
+Each frame goes to a file in `$XDG_RUNTIME_DIR` (or `$TMPDIR`) as the cells of
+a `Raster`, or in kitty and Ghostty into shared memory for an `Image`,
+rendered at the box's size in pixels. The mod paints it in place. The engine
+also reads the terminal's size, in pixels too where the terminal reports it,
+so the mod can refit the picture whenever the terminal changes.
+`hooks/gamepad.tsx` runs over the picture and turns key presses into held
+buttons. Other terminals get the engine's own window (`engine/window.c`) with
+the console drawn around the game (`engine/console.c`), shown only while the
+session's terminal tab is in front (`engine/frontmost.c`, which asks the
+desktop's accessibility bus). The engine loads
+`libX11` the first time the window opens and reads the buttons straight from
+the window. Keys that aren't the Game Boy's, like S, L, O, G, M and F, go up
+to the mod, which sends back the window's title. Sound, when on, is played
+through `aplay`, `pacat` or `ffplay`.
 
 The engine can also be run by hand:
 

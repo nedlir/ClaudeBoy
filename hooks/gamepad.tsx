@@ -46,7 +46,7 @@ type Pad = {
   posted: string
 }
 
-const Gamepad: ClientModule<null, Pad> = (props, surface) => {
+const Gamepad: ClientModule<null, Pad> = (_props, surface) => {
   if (surface.state === undefined) {
     const pad: Pad = {
       id: Math.random().toString(36).slice(2, 10),

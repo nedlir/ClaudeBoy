@@ -457,6 +457,10 @@ void frontmostNoteShown(void) {
 	}
 	atomic_store(&isNoteAnswered, false);
 	atomic_store(&isShowNoted, true);
+	// The watcher failed meanwhile: nobody will answer
+	if (atomic_load(&hasFailed)) {
+		atomic_store(&isNoteAnswered, true);
+	}
 }
 
 bool frontmostIsNoteAnswered(void) {

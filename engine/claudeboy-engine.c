@@ -32,7 +32,6 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <sys/sysmacros.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -134,8 +133,8 @@ static const int64_t FRAME_NS = 16742706;
 
 static const char* const BUTTON_NAMES[BUTTONS] = { "a", "b", "select", "start", "right", "left", "up", "down" };
 
-// Players tried in order for the sound, raw 16-bit stereo on their stdin
-// Players tried in turn; their rate is SAMPLE_RATE's
+// Players tried in turn for the sound: raw 16-bit stereo at 48 kHz
+// (SAMPLE_RATE) on their stdin
 static const char* const AUDIO_PLAYERS[][16] = {
 	{ "aplay", "-q", "-t", "raw", "-f", "S16_LE", "-c", "2", "-r", "48000", "-B", "100000", "-", NULL },
 	{ "pacat", "--raw", "--format=s16le", "--rate=48000", "--channels=2", "--latency-msec=100", NULL },
@@ -212,6 +211,9 @@ struct Engine {
 	int lock;
 	bool hasLock;
 	bool isBusyReported;
+	// Since when the game couldn't be taken: said after a moment, as another
+	// engine starting holds the lock for a few milliseconds
+	int64_t busySinceNs;
 	// When this engine took the game, by the wall clock, so a request to hand
 	// it over from before then is stale; and when it last looked for one
 	int64_t claimedAtNs;
@@ -384,7 +386,12 @@ static bool readRomInfo(const char* path, struct RomInfo* info, char* error, siz
 	uint8_t* data = malloc(maxSize + 1);
 	size_t size = data ? fread(data, 1, maxSize + 1, file) : 0;
 	fclose(file);
-	if (!data || size < 0x150 || size > maxSize) {
+	struct VFile* vf = data && size >= 0x150 && size <= maxSize ? VFileFromConstMemory(data, size) : NULL;
+	const bool isGameBoy = vf && mCoreIsCompatible(vf) == mPLATFORM_GB;
+	if (vf) {
+		vf->close(vf);
+	}
+	if (!isGameBoy) {
 		free(data);
 		snprintf(error, errorSize, "that isn't a Game Boy ROM");
 		return false;
@@ -514,6 +521,8 @@ static bool openGame(struct Engine* engine, const char* romPath, char* error, si
 		snprintf(error, errorSize, "the ROM didn't load");
 		// The core has the ROM's file now, and closes it
 		core->deinit(core);
+		free(engine->video);
+		engine->video = NULL;
 		return false;
 	}
 
@@ -524,6 +533,8 @@ static bool openGame(struct Engine* engine, const char* romPath, char* error, si
 		snprintf(error, errorSize, "can't open the battery save %s: %s", path, strerror(errno));
 		core->unloadROM(core);
 		core->deinit(core);
+		free(engine->video);
+		engine->video = NULL;
 		return false;
 	}
 	core->loadSave(core, battery);
@@ -684,16 +695,15 @@ static void stopHolder(const struct Engine* engine) {
 	char line[256];
 	while (fgets(line, sizeof(line), locks)) {
 		int pid = 0;
-		unsigned major = 0;
-		unsigned minor = 0;
 		unsigned long inode = 0;
 		// "1: FLOCK  ADVISORY  WRITE 3849 00:57:88 0 EOF"
 		const char* write = strstr(line, "WRITE");
-		if (!strstr(line, "FLOCK") || !write || sscanf(write + 5, "%d %x:%x:%lu", &pid, &major, &minor, &inode) != 4) {
+		if (!strstr(line, "FLOCK") || !write || sscanf(write + 5, "%d %*x:%*x:%lu", &pid, &inode) != 2) {
 			continue;
 		}
-		if (inode != (unsigned long) lock.st_ino || major != major(lock.st_dev) || minor != minor(lock.st_dev) || pid <= 0 ||
-		    pid == getpid()) {
+		// By inode alone: on btrfs /proc/locks names the filesystem's device and
+		// stat a subvolume's. The command line below makes sure of the rest.
+		if (inode != (unsigned long) lock.st_ino || pid <= 0 || pid == getpid()) {
 			continue;
 		}
 		char path[64];
@@ -894,9 +904,10 @@ struct Spread {
 	float* weights;
 };
 
-static void spreadAxis(struct Spread* spread, int source, int size) {
+// False when out of memory
+static bool spreadAxis(struct Spread* spread, int source, int size) {
 	if (spread->size == size && spread->first) {
-		return;
+		return true;
 	}
 	free(spread->first);
 	free(spread->count);
@@ -906,6 +917,13 @@ static void spreadAxis(struct Spread* spread, int source, int size) {
 	spread->first = calloc(size, sizeof(int));
 	spread->count = calloc(size, sizeof(int));
 	spread->weights = calloc((size_t) size * spread->taps, sizeof(float));
+	if (!spread->first || !spread->count || !spread->weights) {
+		free(spread->first);
+		free(spread->count);
+		free(spread->weights);
+		memset(spread, 0, sizeof(*spread));
+		return false;
+	}
 	const double step = (double) source / size;
 	for (int i = 0; i < size; i++) {
 		const double start = i * step;
@@ -923,11 +941,13 @@ static void spreadAxis(struct Spread* spread, int source, int size) {
 		}
 		spread->count[i] = count;
 	}
+	return true;
 }
 
 // The screen as large as fits in a `width` by `height` RGBA picture at its own
 // shape, in the middle, the strip left over see-through
-static void renderPicture(const color_t* frame, int width, int height, uint8_t* out) {
+// False when out of memory
+static bool renderPicture(const color_t* frame, int width, int height, uint8_t* out) {
 	int pictureWidth = width;
 	int pictureHeight = (int) lround((double) width * HEIGHT / WIDTH);
 	if (pictureHeight > height) {
@@ -941,8 +961,9 @@ static void renderPicture(const color_t* frame, int width, int height, uint8_t* 
 
 	static struct Spread across;
 	static struct Spread down;
-	spreadAxis(&across, WIDTH, pictureWidth);
-	spreadAxis(&down, HEIGHT, pictureHeight);
+	if (!spreadAxis(&across, WIDTH, pictureWidth) || !spreadAxis(&down, HEIGHT, pictureHeight)) {
+		return false;
+	}
 
 	// Across first, into rows as wide as the picture
 	static float* rows = NULL;
@@ -951,7 +972,10 @@ static void renderPicture(const color_t* frame, int width, int height, uint8_t* 
 	if (rowsLength < needed) {
 		free(rows);
 		rows = malloc(needed * sizeof(float));
-		rowsLength = needed;
+		rowsLength = rows ? needed : 0;
+		if (!rows) {
+			return false;
+		}
 	}
 	for (int y = 0; y < HEIGHT; y++) {
 		const color_t* line = &frame[y * WIDTH];
@@ -990,6 +1014,7 @@ static void renderPicture(const color_t* frame, int width, int height, uint8_t* 
 			pixel[3] = 255;
 		}
 	}
+	return true;
 }
 
 // The size a picture for a `boxWidth` by `boxHeight` box is drawn at: the box
@@ -1034,8 +1059,12 @@ static bool writeShmFrame(struct Engine* engine, const color_t* frame, int boxWi
 		shm_unlink(name);
 		return false;
 	}
-	renderPicture(frame, width, height, out);
+	const bool isRendered = renderPicture(frame, width, height, out);
 	munmap(out, size);
+	if (!isRendered) {
+		shm_unlink(name);
+		return false;
+	}
 	emit("@frame %s %d %d", name, width, height);
 	return true;
 }
@@ -1118,13 +1147,10 @@ static void drawCountdown(color_t* frame, int seconds, double elapsed) {
 	const color_t panel = CORE_COLOR(0x2A2321);
 	const color_t cream = CORE_COLOR(0xF6E7DC);
 	const color_t dim = CORE_COLOR(0x8C7C74);
-	// The panel, its corners cut, edged in orange
-	fillRect(frame, 18, 22, 124, 100, orange);
+	// The panel, edged in orange, its corners cut to show the game behind
+	fillRect(frame, 18, 23, 124, 98, orange);
+	fillRect(frame, 19, 22, 122, 100, orange);
 	fillRect(frame, 20, 24, 120, 96, panel);
-	fillRect(frame, 18, 22, 1, 1, 0);
-	fillRect(frame, 141, 22, 1, 1, 0);
-	fillRect(frame, 18, 121, 1, 1, 0);
-	fillRect(frame, 141, 121, 1, 1, 0);
 	drawCentered(frame, 31, 1, "BACK TO CLAUDE", cream);
 	const char digit[2] = { (char) ('0' + seconds), 0 };
 	drawCentered(frame, 45, 6, digit, orange);
@@ -1139,7 +1165,7 @@ static void drawCountdown(color_t* frame, int seconds, double elapsed) {
 // rate and only when the picture changed, unless `isForced`
 static void showFrame(struct Engine* engine, bool isForced) {
 	const struct Control* wanted = &engine->wanted;
-	if (wanted->view == VIEW_NONE || !engine->core) {
+	if (wanted->view == VIEW_NONE) {
 		return;
 	}
 	const int64_t now = monotonicNs();
@@ -1416,6 +1442,9 @@ static void parseControl(char* line, struct Control* control, struct Command* co
 			control->countdown = clampInt(atoi(value), 0, 9);
 		} else if (!strcmp(token, "overlay")) {
 			sscanf(value, "%d,%d,%d,%d", &control->overlay[0], &control->overlay[1], &control->overlay[2], &control->overlay[3]);
+			for (int i = 0; i < 4; i++) {
+				control->overlay[i] = clampInt(control->overlay[i], 0, 4096);
+			}
 		} else if (!strcmp(token, "title")) {
 			base64Decode(value, control->title, sizeof(control->title));
 		} else if (!strcmp(token, "cmds")) {
@@ -1509,7 +1538,7 @@ static void readControl(struct Engine* engine) {
 		engine->taps[i] = engine->wanted.taps[i];
 	}
 	engine->hasTaps = true;
-	for (int i = 0; i < commandCount && engine->core; i++) {
+	for (int i = 0; i < commandCount; i++) {
 		runCommand(engine, &commands[i]);
 	}
 }
@@ -1809,6 +1838,7 @@ static int play(const char* romPath, const char* saves, const char* run) {
 
 		if (!engine.wanted.isPlaying) {
 			engine.isBusyReported = false;
+			engine.busySinceNs = 0;
 			engine.hasYielded = false;
 			endTakeover(&engine);
 			if (engine.isPlaying) {
@@ -1836,7 +1866,10 @@ static int play(const char* romPath, const char* saves, const char* run) {
 		}
 		if (!engine.isPlaying) {
 			if (!claimGame(&engine)) {
-				if (!engine.isBusyReported) {
+				if (!engine.busySinceNs) {
+					engine.busySinceNs = monotonicNs();
+				}
+				if (!engine.isBusyReported && monotonicNs() - engine.busySinceNs > 150000000LL) {
 					engine.isBusyReported = true;
 					emit("@busy");
 				}
@@ -1856,6 +1889,7 @@ static int play(const char* romPath, const char* saves, const char* run) {
 				continue;
 			}
 			endTakeover(&engine);
+			engine.busySinceNs = 0;
 			engine.isPlaying = true;
 			engine.mustShow = true;
 			next = monotonicNs();
@@ -2018,7 +2052,12 @@ static int script(const char* romPath, const char* saves, const char* out, int s
 				fprintf(stderr, "can't write %s\n", path);
 				return 1;
 			}
-			renderPicture(frame, width, height, picture);
+			if (!renderPicture(frame, width, height, picture)) {
+				fclose(file);
+				free(picture);
+				fprintf(stderr, "out of memory\n");
+				return 1;
+			}
 			fprintf(file, "P6\n%d %d\n255\n", width, height);
 			for (size_t p = 0; p < (size_t) width * height; p++) {
 				// The see-through strip shows magenta
@@ -2063,7 +2102,9 @@ int main(int argc, char** argv) {
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	mLogSetDefaultLogger(&logger);
 
-	struct sigaction stop = { .sa_handler = requestStop };
+	// SA_RESTART: a write to stdout isn't cut short by it; sleeps still are,
+	// so the stop is noticed at once
+	struct sigaction stop = { .sa_handler = requestStop, .sa_flags = SA_RESTART };
 	sigemptyset(&stop.sa_mask);
 	sigaction(SIGTERM, &stop, NULL);
 	sigaction(SIGINT, &stop, NULL);

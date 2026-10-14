@@ -35,8 +35,8 @@ const STATUS_ROWS = 4
 
 const SCREEN_WIDTH = 160
 const SCREEN_HEIGHT = 144
-// The engine's wide console, in its own pixels (engine/console.c)
-const WIDE_CONSOLE_WIDTH = 272
+// The engine's console, in its own pixels: CONSOLE_WIDTH in engine/console.h
+const CONSOLE_WIDTH = 272
 // A cell's size in pixels until the terminal says: most fonts are about
 // twice as tall as wide
 const DEFAULT_CELL = { width: 10, height: 20 }
@@ -49,9 +49,9 @@ const IMAGE_FAILURES_BEFORE_CELLS = 10
 const ROM_EXTENSIONS = /\.(gb|gbc)$/i
 const SLOTS = ['1', '2', '3', '4', '5', '6', '7', '8', '9']
 
-// The Game Boy's buttons: Shift only on the console, as terminals don't
-// report Shift alone
-const CONTROLS = 'the arrows, Z for A, X for B, Enter for Start, Shift or Backspace for Select'
+// The Game Boy's buttons. Shift works only on the console: terminals don't
+// report Shift alone.
+const CONTROLS = 'the arrows, Z for A, X for B, Enter for Start, Backspace (or Shift on the console) for Select'
 // ClaudeBoy's own keys, for the help and the welcome
 const GAME_KEYS = 'S: save · L: load · O: open · G: game library · M: sound · F: speed ×1, ×2, ×4 · Esc: exit'
 
@@ -109,8 +109,9 @@ let hasDesktop = false
 // A cell's size in pixels, as the engine last read the terminal's; zero while
 // the terminal doesn't say
 let cell = { width: 0, height: 0 }
-// The engine's estimate, from where it found the terminal on the screen
-let isCellEstimated = false
+// The engine found the terminal's grid of cells on the screen (and `cell`
+// is its estimate): it lays the console over the pane
+let hasGrid = false
 // The terminal's width in cells, and the drawer's and the desktop's in pixels:
 // how many columns the pane takes to make room for the drawer
 let terminalColumns = 0
@@ -157,7 +158,7 @@ let isSavedSincePause = false
 // The picture: the size the pane lays the game out at, the newest frame for
 // it, and the size of the Raster or Image last drawn
 let size: Size | null = null
-let drawnSize: string | null = null
+let drawnView: string | null = null
 let cells: { size: string; text: string } | null = null
 let frame: Frame | null = null
 // The picture last handed to the terminal, and whether that's under way
@@ -185,10 +186,11 @@ let menuError: string | null = null
 let foundRoms: string[] = []
 let isPlayAfterOpen = false
 let isSwitchingGame = false
+// The slots' times for the picker, and when they were read
 let slotTimes: Record<string, number> = {}
+let slotsReadAt = 0
 let message: string | null = null
 let messageTimer: Timer | null = null
-let now = 0
 
 // ---------------------------------------------------------------------------
 // Paths, the ROM and the engine's build
@@ -236,7 +238,7 @@ function findRoms($: Dollar): Promise<string[]> {
   return romsIn($, [root, root + '/roms', dataDir + '/roms'])
 }
 
-const NO_GAME = 'No game yet: press O in ClaudeBoy, or run /claudeboy open <path to a .gb or .gbc file>.'
+const NO_GAME = 'No game yet: run /claudeboy open to pick one, or /claudeboy open <path to a .gb or .gbc file>.'
 
 // The game to play: the one last chosen from the library, read for its title
 // and save key, the engine built first if need be. Returns what's wrong, or
@@ -258,7 +260,14 @@ async function loadGame($: Dollar): Promise<string | null> {
 }
 
 // From before the library: the game ClaudeBoy played becomes its first entry
-async function keepFirstGame($: Dollar) {
+let firstGame: Promise<void> | null = null
+
+function keepFirstGame($: Dollar): Promise<void> {
+  firstGame ??= moveFirstGame($)
+  return firstGame
+}
+
+async function moveFirstGame($: Dollar) {
   if (isLibraryKept) return
   isLibraryKept = true
   if (!wasUsed) return
@@ -313,7 +322,8 @@ async function switchGame($: Dollar, path: string): Promise<string | null> {
 
 let build: Promise<string | null> | null = null
 
-// The engine is built from source once, by scripts/build.sh
+// The engine is built from source by scripts/build.sh: the first time, and
+// again when its source is newer
 function ensureEngine($: Dollar): Promise<string | null> {
   build ??= buildEngine($).finally(() => {
     build = null
@@ -321,9 +331,12 @@ function ensureEngine($: Dollar): Promise<string | null> {
   return build
 }
 
+// An update that wouldn't build is tried once a session, not at every drop-in
+let isUpdateFailed = false
+
 async function buildEngine($: Dollar): Promise<string | null> {
   const hasEngine = await $.fs.exists(enginePath())
-  if (hasEngine && !(await isEngineOlderThanSource($))) return null
+  if (hasEngine && (isUpdateFailed || !(await isEngineOlderThanSource($)))) return null
   showWelcomeStatus(
     $,
     hasEngine ? 'Updating the emulator…' : 'Building the emulator, which happens once and takes about a minute…',
@@ -339,6 +352,7 @@ async function buildEngine($: Dollar): Promise<string | null> {
   }
   // An update that won't build leaves the emulator that was: it still plays
   if (!hasEngine) return problem
+  isUpdateFailed = true
   $.ui.log('claudeboy: ' + problem + '; playing on the emulator built before', { to: 'debug' })
   return null
 }
@@ -369,6 +383,11 @@ function cancelTimer() {
   timer = null
 }
 
+// In the game: playing, or counting down to the hand-back
+function isInGame(): boolean {
+  return phase === 'playing' || phase === 'countdown'
+}
+
 function armDropIn($: Dollar) {
   if (!isOn || !isTurnRunning || isDismissed || phase !== 'idle' || menu) return
   phase = 'waiting'
@@ -376,7 +395,7 @@ function armDropIn($: Dollar) {
 }
 
 async function dropIn($: Dollar) {
-  if (phase !== 'waiting') return
+  if (phase !== 'waiting' || menu) return
   timer = null
   const surfaces = await $.session.surfaces()
   if (!surfaces.includes('terminal') || (await loadGame($)) !== null || phase !== 'waiting') {
@@ -385,14 +404,13 @@ async function dropIn($: Dollar) {
   }
   if (pictureMode() === 'window') {
     await openDrawerPane($)
-    // Claude may have finished, or asked something, meanwhile
     if (phase === 'waiting') await startPlaying($)
-    else await $.ui.close({ id: PANE })
+    else closeIfUnused($)
     return
   }
   const opened = await openPane($)
   if (phase !== 'waiting') {
-    await $.ui.close({ id: PANE })
+    closeIfUnused($)
     return
   }
   if (!opened.isPlaced) {
@@ -418,15 +436,15 @@ function drawerColumns(): number {
   // Where the engine lays the console over the pane instead (it found the
   // terminal's cells on the screen), wide enough for the wide console at twice
   // its size; the engine fits whichever shape shows the game largest
-  if (!isCellEstimated) return columns
-  return Math.max(columns, Math.ceil((2 * WIDE_CONSOLE_WIDTH) / cell.width) + 1)
+  if (!hasGrid) return columns
+  return Math.max(columns, Math.ceil((2 * CONSOLE_WIDTH) / cell.width) + 1)
 }
 
 // In window mode the pane opens beside the transcript as wide as the console
 // needs, laid over it or out in the drawer, so the transcript moves aside.
 // The keys go to the console, unless `isFocused` (a menu, a question). Where
 // it doesn't fit, it stays shut.
-async function openDrawerPane($: Dollar, isFocused = false) {
+async function openDrawerPane($: Dollar, isFocused = false): Promise<boolean> {
   const opened = await $.ui.open({
     id: PANE,
     title: game?.title ?? 'ClaudeBoy',
@@ -437,26 +455,50 @@ async function openDrawerPane($: Dollar, isFocused = false) {
     rows: menu || isAskingTakeover ? INLINE_ROWS : STATUS_ROWS + 2,
   })
   if (!opened.isPlaced) await $.ui.close({ id: PANE })
+  return opened.isPlaced
 }
 
 // Opens the pane again (or retitles it) as the picture needs it: in window
 // mode beside the console, which has the keys unless `isFocused`; else with
 // the picture in it, taking the keys
-async function reopenPane($: Dollar, isFocused = false) {
-  if (pictureMode() === 'window') await openDrawerPane($, isFocused)
-  else await openPane($)
+async function reopenPane($: Dollar, isFocused = false): Promise<boolean> {
+  if (pictureMode() === 'window') return openDrawerPane($, isFocused)
+  return (await openPane($)).isPlaced
+}
+
+// The kind of picture changed while in the game (the display setting, a
+// terminal refusing pictures, no window to be had): drawn the new way from
+// now on, the pane opened for it. False when it can't be placed.
+async function changeView($: Dollar): Promise<boolean> {
+  forgetPicture()
+  hasWindowFocus = false
+  // A picture's or cells' size comes from the pane as it draws
+  wanted.view = pictureMode() === 'window' ? 'window' : 'none'
+  scheduleControl($)
+  const isPlaced = await reopenPane($)
+  redraw($)
+  return isPlaced
 }
 
 async function acceptOffer($: Dollar) {
   if (phase !== 'offered') return
   const { isPlaced } = await openPane($)
-  if (isPlaced && phase === 'offered') await startPlaying($)
+  if (!isPlaced) return
+  if (phase === 'offered') await startPlaying($)
+  else closeIfUnused($)
+}
+
+// Claude finished, or asked something, while the pane was opening: closed
+// again, unless something else took it up meanwhile (/claudeboy play, a menu)
+function closeIfUnused($: Dollar) {
+  if (phase === 'idle' && !menu && !isWelcomeOpen) void $.ui.close({ id: PANE })
 }
 
 async function startPlaying($: Dollar) {
   cancelTimer()
   phase = 'playing'
   wanted.countdown = 0
+  toastWhenPaused = null
   isWelcomeOpen = false
   picker = null
   awayTimer?.cancel()
@@ -471,8 +513,9 @@ async function startPlaying($: Dollar) {
   else void runEngine($)
 }
 
-// Claude is done or needs the person before they took up the offer
-function withdrawOffer($: Dollar) {
+// No drop-in after all: Claude is done or needs the person before it came, or
+// before they took up the offer, or a menu is opening
+function cancelDropIn($: Dollar) {
   cancelTimer()
   phase = 'idle'
   redraw($)
@@ -520,7 +563,7 @@ function goAway($: Dollar, why: string) {
   menu = null
   menuError = null
   isPlayAfterOpen = false
-  const wasPlaying = phase === 'playing' || phase === 'countdown'
+  const wasPlaying = isInGame()
   // Under a menu the game was already paused: no pause will come to toast
   const wasRunning = wanted.isPlaying
   if (!wasPlaying && !isWelcomeOpen && !wanted.isPlaying) {
@@ -540,6 +583,8 @@ function goAway($: Dollar, why: string) {
   if (wasPlaying && wasRunning) {
     toastWhenPaused = why
     isSavedSincePause = false
+  } else if (wasPlaying && why) {
+    $.ui.toast(why)
   }
   scheduleControl($)
   armAwayStop($)
@@ -553,8 +598,8 @@ function armAwayStop($: Dollar) {
 
 // Claude is about to ask the person something, so they must see the prompt
 async function needsYou($: Dollar) {
-  if (phase === 'waiting' || phase === 'offered') withdrawOffer($)
-  else if (phase === 'playing' || phase === 'countdown') await handBack($, 'Claude needs you')
+  if (phase === 'waiting' || phase === 'offered') cancelDropIn($)
+  else if (isInGame()) await handBack($, 'Claude needs you')
 }
 
 // ---------------------------------------------------------------------------
@@ -564,7 +609,8 @@ async function runEngine($: Dollar) {
   if (engine || !game) return
   const playing = game
   const id = Math.random().toString(36).slice(2, 8)
-  runDir = runtimeDir + '/claudeboy-' + id
+  const folder = runtimeDir + '/claudeboy-' + id
+  runDir = folder
   engineError = null
   announcedSeq = 0
   pulledSeq = 0
@@ -574,7 +620,7 @@ async function runEngine($: Dollar) {
   })
   // Set before anything is awaited, so a caller finds it at once. The engine
   // stays paused until its control file says otherwise, and reads it every frame.
-  const child = $.process.spawn({ argv: [enginePath(), 'run', playing.rom, savesDir(playing), runDir] })
+  const child = $.process.spawn({ argv: [enginePath(), 'run', playing.rom, savesDir(playing), folder] })
   engine = child
   scheduleControl($)
   let pending = ''
@@ -592,23 +638,18 @@ async function runEngine($: Dollar) {
   } catch (error) {
     engineError ??= "ClaudeBoy couldn't start its emulator"
     $.ui.log('claudeboy: the engine failed: ' + String(error), { to: 'debug' })
-  } finally {
-    if (engine === child) engine = null
-    if (stderr) $.ui.log('claudeboy: the engine said: ' + stderr.trim(), { to: 'debug' })
-    for (const command of commands) {
-      command.timer.cancel()
-      command.resolve({ isOk: false, words: 'the emulator stopped' })
-    }
-    commands = []
-    const folder = runDir
-    runDir = null
-    markExited()
-    if (folder?.startsWith(runtimeDir + '/claudeboy-')) void $.process.run(['rm', '-rf', folder]).catch(() => {})
   }
+  // An engine given up on (stopEngine) may end after the next one started:
+  // then only its own folder is its to clear
+  const isCurrent = engine === child
+  if (stderr) $.ui.log('claudeboy: the engine said: ' + stderr.trim(), { to: 'debug' })
+  if (isCurrent) forgetEngine()
+  markExited()
+  void $.process.run(['rm', '-rf', folder]).catch(() => {})
   // Ending on its own while someone plays means it failed or was refused;
   // while they're away, the next drop-in simply starts it again. It also ends
   // when this module unloads, and then there's nothing to close.
-  if ((phase === 'playing' || phase === 'countdown') && !isSwitchingGame) {
+  if (isCurrent && isInGame() && !isSwitchingGame) {
     try {
       $.ui.toast(engineError ?? "ClaudeBoy's emulator stopped", { timeoutMs: 8000 })
       if (isTurnRunning) isDismissed = true
@@ -639,14 +680,14 @@ function onEngineLine($: Dollar, line: string) {
     case '@cell':
       // Where the terminal fills the desktop, the engine tells its cells' size
       cell = { width: Number(words[0]) || 0, height: Number(words[1]) || 0 }
-      isCellEstimated = cell.width > 0
-      if (wanted.view === 'window' && (phase === 'playing' || phase === 'countdown')) void openDrawerPane($)
+      hasGrid = cell.width > 0
+      if (wanted.view === 'window' && isInGame()) void openDrawerPane($)
       redraw($)
       break
     case '@drawer':
       drawer = { width: Number(words[0]) || 0, workWidth: Number(words[1]) || 0 }
       // Sized now the drawer is: the pane makes room to match
-      if (wanted.view === 'window' && (phase === 'playing' || phase === 'countdown')) void openDrawerPane($)
+      if (wanted.view === 'window' && isInGame()) void openDrawerPane($)
       break
     case '@done': {
       const index = commands.findIndex((command) => command.id === Number(words[0]))
@@ -672,8 +713,10 @@ function onEngineLine($: Dollar, line: string) {
       void onBusy($)
       break
     case '@playing':
+      // The other session paused before the question was answered
       if (isAskingTakeover) {
         isAskingTakeover = false
+        void reopenPane($)
         redraw($)
       }
       break
@@ -685,7 +728,7 @@ function onEngineLine($: Dollar, line: string) {
       break
     case '@key':
       // Typed in the game's window: what a key over the pane's picture does
-      if (words[0] && (phase === 'playing' || phase === 'countdown')) void onKey($, words[0])
+      if (words[0] && isInGame()) void onKey($, words[0])
       break
     case '@focus':
       hasWindowFocus = words[0] === '1'
@@ -717,11 +760,7 @@ function onEngineLine($: Dollar, line: string) {
 async function noWindow($: Dollar, reason: string) {
   isWindowBroken = true
   $.ui.log('claudeboy: no game window (' + reason + '); playing in the pane', { to: 'debug' })
-  if (phase !== 'playing' && phase !== 'countdown') return
-  wanted.view = 'none'
-  const opened = await openPane($)
-  if (opened.isPlaced) redraw($)
-  else await handBack($, '')
+  if (isInGame() && !(await changeView($))) await handBack($, '')
 }
 
 // Another session is playing this game right now: it has the saves until it
@@ -729,7 +768,7 @@ async function noWindow($: Dollar, reason: string) {
 // and 0 or the arrows and Enter answer. Should that session pause first, the
 // engine takes the game and the question goes.
 async function onBusy($: Dollar) {
-  if (phase !== 'playing' && phase !== 'countdown') return
+  if (!isInGame()) return
   isAskingTakeover = true
   // The gamepad goes with the picture; a new one waits for a click
   hasKeys = false
@@ -740,6 +779,7 @@ async function onBusy($: Dollar) {
 // Yes: take it. The other session saves and lets go at once.
 async function takeOver($: Dollar) {
   isAskingTakeover = false
+  await reopenPane($)
   redraw($)
   await sendCommand($, 'takeover')
 }
@@ -767,8 +807,10 @@ function controlLine(): string {
     'keys=' + wanted.keys,
     'taps=' + wanted.taps.join(','),
     'view=' + wanted.view,
-    // Cells cost the terminal a redraw of the pane each frame: half the rate
-    'fps=' + (wanted.view.startsWith('cells') ? 30 : 60),
+    // Pictures and the console over the pane at the Game Boy's own rate.
+    // Cells cost the terminal a redraw of the pane each frame, and the drawer
+    // can be as large as half the screen: half the rate for those.
+    'fps=' + (wanted.view.startsWith('image') || (wanted.view === 'window' && wanted.overlay !== 'none') ? 60 : 30),
     'sound=' + (isSoundOn ? 1 : 0),
     'speed=' + wanted.speed,
   ]
@@ -829,7 +871,7 @@ async function ensureRunning($: Dollar): Promise<string | null> {
   if (!engine) {
     // Started by itself (runEngine sets it at once), it stops like any other
     void runEngine($)
-    if (phase === 'idle') armAwayStop($)
+    if (!isInGame()) armAwayStop($)
   }
   return null
 }
@@ -847,6 +889,20 @@ async function stopEngine($: Dollar) {
     // Its stream ends after: wait for that too, so a new engine follows it
     await Promise.race([engineExited, $.clock.sleep(1000)])
   }
+  // Given up on if it still hasn't ended: a new one may start meanwhile, and
+  // mustn't be handed what was this one's (its quit above, most of all)
+  if (engine === child) forgetEngine()
+}
+
+// No engine any more: its commands unanswered, its folder not written to
+function forgetEngine() {
+  engine = null
+  for (const command of commands) {
+    command.timer.cancel()
+    command.resolve({ isOk: false, words: 'the emulator stopped' })
+  }
+  commands = []
+  runDir = null
 }
 
 // ---------------------------------------------------------------------------
@@ -855,7 +911,7 @@ async function stopEngine($: Dollar) {
 function forgetPicture() {
   wanted.overlay = 'none'
   size = null
-  drawnSize = null
+  drawnView = null
   cells = null
   frame = null
   blittedFrame = null
@@ -895,7 +951,7 @@ function statusLine(isInDrawer = false): { text: string; isStrong: boolean } {
 // Code's hints are, at most three to a row. F with the speed now.
 function hintRows(): string[] {
   if (picker) {
-    const slots = SLOTS.map((slot) => slot + ': ' + (slotTimes[slot] ? ago(slotTimes[slot]) : 'empty'))
+    const slots = SLOTS.map((slot) => slot + ': ' + (slotTimes[slot] ? ago(slotTimes[slot], slotsReadAt) : 'empty'))
     return [slots.slice(0, 3), slots.slice(3, 6), slots.slice(6, 9)].map((row) => row.join(' · '))
   }
   return [
@@ -964,7 +1020,7 @@ async function pullCells($: Dollar) {
       pulledSeq = Math.max(pulledSeq, seq || 0)
       if (!size || columns !== size.columns || rows !== size.rows) continue
       cells = { size: 'cells:' + columns + 'x' + rows, text: text.slice(newline + 1) }
-      if (drawnSize === cells.size) {
+      if (drawnView === cells.size) {
         await $.ui.blit({ requestId: PANE, key: 'view', cells: cells.text }).catch(() => ({}))
       } else {
         redraw($)
@@ -977,7 +1033,7 @@ async function pullCells($: Dollar) {
 
 function showImageFrame($: Dollar, next: Frame) {
   frame = next
-  if (drawnSize !== 'image') {
+  if (drawnView !== 'image') {
     redraw($)
     return
   }
@@ -991,7 +1047,7 @@ async function blitFrames($: Dollar) {
   if (isBlitting) return
   isBlitting = true
   try {
-    while (frame && frame !== blittedFrame && drawnSize === 'image') {
+    while (frame && frame !== blittedFrame && drawnView === 'image') {
       const next = frame
       blittedFrame = next
       const result = await $.ui.blit({ requestId: PANE, key: 'view', source: next }).catch(() => ({ deny: 'failed' }))
@@ -1003,8 +1059,8 @@ async function blitFrames($: Dollar) {
       // This terminal shows the alt text, not pictures: draw cells instead
       if (imageFailures >= IMAGE_FAILURES_BEFORE_CELLS && display === 'auto') {
         isImageBroken = true
-        $.ui.log('claudeboy: pictures refused (' + result.deny + '); drawing cells', { to: 'debug' })
-        redraw($)
+        $.ui.log('claudeboy: pictures refused (' + result.deny + '); drawing the game another way', { to: 'debug' })
+        if (isInGame()) void changeView($)
         break
       }
     }
@@ -1066,7 +1122,7 @@ async function readSlotTimes($: Dollar): Promise<Record<string, number>> {
   return times
 }
 
-function ago(at: number): string {
+function ago(at: number, now: number): string {
   const seconds = Math.max(0, Math.round((now - at) / 1000))
   if (seconds < 60) return 'just now'
   if (seconds < 3600) return Math.floor(seconds / 60) + 'm ago'
@@ -1085,7 +1141,7 @@ async function onKey($: Dollar, key: string) {
   if (key === 's' || key === 'l') {
     picker = key === 's' ? 'save' : 'load'
     slotTimes = await readSlotTimes($)
-    now = await $.clock.now()
+    slotsReadAt = await $.clock.now()
     redraw($)
   } else if (key === 'm') {
     isSoundOn = !isSoundOn
@@ -1109,16 +1165,20 @@ async function onKey($: Dollar, key: string) {
 // Shows a menu in the pane, the game paused under it, the pane taking the
 // keys: typed paths, 1–9, the arrows and Enter reach the menu
 async function openMenu($: Dollar, which: 'open' | 'games') {
-  // The library as it stands, the game from before it in it
-  await ensureEngine($)
-  await keepFirstGame($)
+  // A drop-in or offer pending doesn't start the game behind the menu
+  if (phase === 'waiting' || phase === 'offered') cancelDropIn($)
+  // The game from before the library in it (which needs the engine, once)
+  if (!isLibraryKept) {
+    await ensureEngine($)
+    await keepFirstGame($)
+  }
   // An empty library has nothing to pick: open a game instead
   if (which === 'games' && !library.length) which = 'open'
   if (which === 'open') foundRoms = await findRomsNearby($)
   menu = which
   menuError = null
   picker = null
-  if (phase === 'playing' || phase === 'countdown') {
+  if (isInGame()) {
     cancelTimer()
     phase = 'playing'
     wanted.isPlaying = false
@@ -1208,13 +1268,19 @@ async function turnOn($: Dollar) {
 async function turnOff($: Dollar) {
   isOn = false
   await $.store.set('isOn', false)
-  if (phase === 'waiting' || phase === 'offered') withdrawOffer($)
+  if (phase === 'waiting' || phase === 'offered') cancelDropIn($)
   else if (phase !== 'idle' || isWelcomeOpen || menu) await handBack($, '')
   await stopEngine($)
   return { text: 'ClaudeBoy is off. Your game is saved.' }
 }
 
 async function playNow($: Dollar) {
+  // A menu up over the game (or over nothing) goes first: the game resumes
+  // under it, or opens below
+  if (menu) {
+    isPlayAfterOpen = false
+    await closeMenu($)
+  }
   const problem = await loadGame($)
   if (problem === NO_GAME) {
     isPlayAfterOpen = true
@@ -1259,9 +1325,9 @@ async function listSlots($: Dollar) {
   const problem = await loadGame($)
   if (problem || !game) return { text: problem ?? 'No game.' }
   const times = await readSlotTimes($)
-  now = await $.clock.now()
-  const lines = SLOTS.map((slot) => '  ' + slot + '  ' + (times[slot] ? ago(times[slot]) : 'empty'))
-  const auto = times.auto ? 'autosaved ' + ago(times.auto) : 'not autosaved yet'
+  const now = await $.clock.now()
+  const lines = SLOTS.map((slot) => '  ' + slot + '  ' + (times[slot] ? ago(times[slot], now) : 'empty'))
+  const auto = times.auto ? 'autosaved ' + ago(times.auto, now) : 'not autosaved yet'
   return { text: game.title + ' (' + auto + '):\n' + lines.join('\n') + '\n\nIn the game, S saves to a slot and L loads one.' }
 }
 
@@ -1273,7 +1339,8 @@ async function openCommand($: Dollar, path: string) {
   }
   const problem = await switchGame($, path)
   if (problem) return { text: problem }
-  if (phase === 'playing' || phase === 'countdown') await startPlaying($)
+  if (menu) await closeMenu($)
+  else if (isInGame()) await startPlaying($)
   return { text: 'ClaudeBoy plays ' + game?.title + ' now.' }
 }
 
@@ -1308,8 +1375,8 @@ async function setDisplay($: Dollar, value: string) {
   isWindowBroken = false
   await $.store.set('display', display)
   redraw($)
-  const isPlaying = phase === 'playing' || phase === 'countdown'
-  return { text: 'Display ' + value + '.' + (isPlaying ? ' It takes effect the next time the game opens.' : '') }
+  if (isInGame()) await changeView($)
+  return { text: 'Display ' + value + '.' }
 }
 
 // ---------------------------------------------------------------------------
@@ -1353,7 +1420,9 @@ export const register: Register = (on) => {
   })
 
   on('session.end', async ($, e, next) => {
-    wanted.isPlaying = false
+    // Out of the game first (the process may go on, after /clear), so the
+    // engine ending isn't taken for a failure
+    goAway($, '')
     await stopEngine($)
     return next(e)
   })
@@ -1411,7 +1480,7 @@ export const register: Register = (on) => {
     if (e.agentId) return next(e)
     isTurnRunning = false
     if (phase === 'waiting' || phase === 'offered') {
-      withdrawOffer($)
+      cancelDropIn($)
     } else if (phase === 'playing' && !isOpenedByCommand && !menu) {
       if (e.isAborted) await handBack($, '')
       else startCountdown($)
@@ -1447,6 +1516,8 @@ export const register: Register = (on) => {
     // Esc during the countdown keeps playing: the pane stays open
     if (e.origin?.kind === 'person' && phase === 'countdown') {
       keepPlaying($)
+      // The gamepad gave the keys back before Esc closed the pane
+      hasKeys = false
       // Opened again, so the next Esc closes it: a refused close spends it
       await reopenPane($)
       return { value: undefined }
@@ -1478,7 +1549,7 @@ export const register: Register = (on) => {
       hasKeys = true
       redraw($)
     }
-    wanted.keys = phase === 'playing' || phase === 'countdown' ? post.held : 0
+    wanted.keys = isInGame() ? post.held : 0
     wanted.taps = post.taps
     scheduleControl($)
     for (const { seq, key } of post.keys) {
@@ -1578,9 +1649,9 @@ export const register: Register = (on) => {
         <Box flexDirection="column" gap={1}>
           <Text bold>ClaudeBoy is on</Text>
           <Text>
-            When Claude has been working for two seconds, your Game Boy game opens here: as a picture in kitty or
-            Ghostty, on a Game Boy drawn over the pane in other terminals. You're handed back when Claude is done or
-            needs you, and the game is saved each time.
+            When Claude has been working for two seconds, your Game Boy game opens: as a picture in this pane in kitty
+            or Ghostty; on a Game Boy drawn over the pane, or at the screen's edge, in other terminals; drawn in text
+            with no desktop. You're handed back when Claude is done or needs you, and the game is saved each time.
           </Text>
           <Text>{"The Game Boy's buttons: " + CONTROLS + '.'}</Text>
           <Text>{'In the game: ' + GAME_KEYS + '.'}</Text>
@@ -1669,7 +1740,7 @@ export const register: Register = (on) => {
         : cells && (
             <Raster key="view" columns={room.columns} rows={room.rows} cells={cells.size === view ? cells.text : blankCells(room)} />
           )
-    drawnSize = picture ? (mode === 'image' ? 'image' : view) : null
+    drawnView = picture ? (mode === 'image' ? 'image' : view) : null
     if (!picture) return <Text dimColor>Starting {game?.title ?? 'the game'}…</Text>
 
     const { text: status, isStrong } = statusLine()
