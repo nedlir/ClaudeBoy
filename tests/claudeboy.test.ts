@@ -516,7 +516,7 @@ test('/claudeboy off hands back and stops the engine', SLOW, async ($, on) => {
   expect(world.opens).toBe(1)
 })
 
-test('asks whether to play here when another session is playing the game; 1 asks that session for it', SLOW, async ($, on) => {
+test('asks whether to play here when another session is playing the game; 1 takes it', SLOW, async ($, on) => {
   const clock = mock.clock(on)
   const world = stubClaudeCode(on, clock, { isBusy: true })
   await startSession($)
@@ -532,7 +532,7 @@ test('asks whether to play here when another session is playing the game; 1 asks
   await game.press({ key: 'takeover-yes' })
   await clock.settle()
   expect(world.controls.some((line) => /cmds=\d+:takeover/.test(line))).toBe(true)
-  expect(await game.find({ text: /Asking the other session for Pokemon Yellow/ })).toBeDefined()
+  expect(await game.find({ text: /Would you like to play it here\?/ })).toBeUndefined()
 
   // That session let go: the game is here now
   world.engine.push('@playing')
@@ -566,7 +566,7 @@ test('0 stays out of the game for the turn, and the next turn asks again', SLOW,
   expect(world.opens).toBeGreaterThan(opens)
 })
 
-test('a session asked for the game hands it over and says where it went', SLOW, async ($, on) => {
+test('a session whose game is taken hands it over and says where it went', SLOW, async ($, on) => {
   const clock = mock.clock(on)
   const world = stubClaudeCode(on, clock)
   await startSession($)

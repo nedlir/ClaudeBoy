@@ -126,10 +126,8 @@ let engine: ReturnType<Dollar['process']['spawn']> | null = null
 let engineExited: Promise<void> | null = null
 let runDir: string | null = null
 let engineError: string | null = null
-// Another session has the game: asking whether to play it here, then asking
-// that session for it
+// Another session has the game: asking whether to play it here
 let isAskingTakeover = false
-let isTakingOver = false
 let awayTimer: Timer | null = null
 let commands: Command[] = []
 let nextCommandId = 1
@@ -398,7 +396,6 @@ function keepPlaying($: Dollar) {
 // Leaving the pane, whoever closes it: pause, which saves the game
 function goAway($: Dollar, why: string) {
   isAskingTakeover = false
-  isTakingOver = false
   const wasPlaying = phase === 'playing' || phase === 'countdown'
   if (!wasPlaying && !isWelcomeOpen && !wanted.isPlaying) {
     cancelTimer()
@@ -543,9 +540,8 @@ function onEngineLine($: Dollar, line: string) {
       void onBusy($)
       break
     case '@playing':
-      if (isAskingTakeover || isTakingOver) {
+      if (isAskingTakeover) {
         isAskingTakeover = false
-        isTakingOver = false
         redraw($)
       }
       break
@@ -553,7 +549,7 @@ function onEngineLine($: Dollar, line: string) {
       void leaveGame($, (game?.title ?? 'The game') + ' moved to another Claude Code session.')
       break
     case '@notyielded':
-      void leaveGame($, "The other session didn't let go of " + (game?.title ?? 'the game') + '. Restart it to play here.')
+      void leaveGame($, "Couldn't take " + (game?.title ?? 'the game') + ' from the other session.')
       break
     case '@key':
       // Typed in the game's window: what a key over the pane's picture does
@@ -603,16 +599,14 @@ async function noWindow($: Dollar, reason: string) {
 async function onBusy($: Dollar) {
   if (phase !== 'playing' && phase !== 'countdown') return
   isAskingTakeover = true
-  isTakingOver = false
   if (pictureMode() === 'window') await openDrawerPane($, true)
   else await openPane($)
   redraw($)
 }
 
-// Yes: the other session saves and lets go, then the engine here takes it
+// Yes: take it. The other session saves and lets go at once.
 async function takeOver($: Dollar) {
   isAskingTakeover = false
-  isTakingOver = true
   redraw($)
   await sendCommand($, 'takeover')
 }
@@ -620,15 +614,13 @@ async function takeOver($: Dollar) {
 // No: stay out for the rest of the turn
 async function declineTakeover($: Dollar) {
   isAskingTakeover = false
-  isTakingOver = false
   if (isTurnRunning) isDismissed = true
   await handBack($, '')
 }
 
-// The game moved: another session asked for it, or wouldn't let it go
+// The game moved: another session took it, or it couldn't be taken
 async function leaveGame($: Dollar, toast: string) {
   isAskingTakeover = false
-  isTakingOver = false
   if (isTurnRunning) isDismissed = true
   $.ui.toast(toast, { timeoutMs: 6000 })
   await handBack($, '')
@@ -1300,7 +1292,6 @@ export const register: Register = (on) => {
         </Box>
       )
     }
-    if (isTakingOver) return <Text dimColor>{'Asking the other session for ' + (game?.title ?? 'the game') + '…'}</Text>
 
     const mode = pictureMode()
     if (mode === 'window') {

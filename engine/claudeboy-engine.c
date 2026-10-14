@@ -62,9 +62,9 @@ static const char USAGE[] =
 	"        @playing, @paused\n"
 	"        @busy                           another session is playing it\n"
 	"        @yielded                        handed the game to a session that\n"
-	"                                        asked for it (cmds=N:takeover)\n"
-	"        @notyielded                     the session playing it didn't hand\n"
-	"                                        it over\n"
+	"                                        took it (cmds=N:takeover)\n"
+	"        @notyielded                     the session playing it couldn't be\n"
+	"                                        made to let go\n"
 	"        @key <letter or digit>          typed in the game's window\n"
 	"        @closed                         the person closed the window (Esc)\n"
 	"        @drawer <width> <desktop-width> the window's width, in pixels\n"
@@ -213,6 +213,7 @@ struct Engine {
 	// Asked the session playing it to hand it over, and since when
 	bool isTakingOver;
 	int64_t takeoverSinceNs;
+	bool isHolderStopped;
 	struct stat autosave;
 	bool hasAutosave;
 
@@ -603,9 +604,10 @@ static bool claimGame(struct Engine* engine) {
 
 // --- Handing the game over ------------------------------------------------
 //
-// A session that finds the game taken can ask for it: it leaves a .takeover
-// file by the saves. The engine playing it sees the file, pauses, saves and
-// lets go, and the asker takes it.
+// A session that finds the game taken can take it: it leaves a .takeover
+// file by the saves. The engine playing it sees the file within a tenth of a
+// second, pauses, saves and lets go. One that doesn't (from before this, or
+// stuck) is stopped, which saves it too.
 
 static void takeoverPath(const struct Engine* engine, char* path, size_t size) {
 	snprintf(path, size, "%s/.takeover", engine->saves);
@@ -621,6 +623,51 @@ static void requestTakeover(struct Engine* engine) {
 	}
 	engine->isTakingOver = true;
 	engine->takeoverSinceNs = monotonicNs();
+	engine->isHolderStopped = false;
+}
+
+// The engine holding the game's lock, from the kernel's list of locks, if
+// it's an engine of ClaudeBoy's: stopped, it saves and lets go
+static void stopHolder(const struct Engine* engine) {
+	char lockPath[PATH_MAX];
+	snprintf(lockPath, sizeof(lockPath), "%s/.lock", engine->saves);
+	struct stat lock;
+	FILE* locks = fopen("/proc/locks", "r");
+	if (stat(lockPath, &lock) != 0 || !locks) {
+		if (locks) {
+			fclose(locks);
+		}
+		return;
+	}
+	char line[256];
+	while (fgets(line, sizeof(line), locks)) {
+		int pid = 0;
+		unsigned major = 0;
+		unsigned minor = 0;
+		unsigned long inode = 0;
+		// "1: FLOCK  ADVISORY  WRITE 3849 00:57:88 0 EOF"
+		if (!strstr(line, "FLOCK") || sscanf(strstr(line, "WRITE") ? strstr(line, "WRITE") + 5 : "", "%d %x:%x:%lu", &pid, &major,
+		                                       &minor, &inode) != 4) {
+			continue;
+		}
+		if (inode != (unsigned long) lock.st_ino || pid <= 0 || pid == getpid()) {
+			continue;
+		}
+		char path[64];
+		char command[PATH_MAX] = { 0 };
+		snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
+		FILE* cmdline = fopen(path, "r");
+		if (cmdline) {
+			const size_t length = fread(command, 1, sizeof(command) - 1, cmdline);
+			command[length] = 0;
+			fclose(cmdline);
+		}
+		if (strstr(command, "claudeboy-engine")) {
+			emit("@log stopping the engine that holds the game (pid %d)", pid);
+			kill(pid, SIGTERM);
+		}
+	}
+	fclose(locks);
 }
 
 static void endTakeover(struct Engine* engine) {
@@ -636,7 +683,7 @@ static void endTakeover(struct Engine* engine) {
 // Asked for since this engine took the game, by another engine
 static bool isTakeoverAsked(struct Engine* engine) {
 	const int64_t now = monotonicNs();
-	if (now - engine->lastTakeoverCheckNs < 250000000LL) {
+	if (now - engine->lastTakeoverCheckNs < 100000000LL) {
 		return false;
 	}
 	engine->lastTakeoverCheckNs = now;
@@ -1364,7 +1411,7 @@ static void runCommand(struct Engine* engine, const struct Command* command) {
 		emit("@done %ld ok refreshed", command->id);
 	} else if (!strcmp(name, "takeover")) {
 		requestTakeover(engine);
-		emit("@done %ld ok asked", command->id);
+		emit("@done %ld ok taking", command->id);
 	} else if (!strcmp(name, "quit")) {
 		isStopRequested = 1;
 		emit("@done %ld ok quitting", command->id);
@@ -1694,13 +1741,19 @@ static int play(const char* romPath, const char* saves, const char* run) {
 					engine.isBusyReported = true;
 					emit("@busy");
 				}
-				// Asked to hand over and still held: an engine from before
-				// sessions could ask, or one stuck
-				if (engine.isTakingOver && monotonicNs() - engine.takeoverSinceNs > 4000000000LL) {
-					endTakeover(&engine);
-					emit("@notyielded");
+				// Taking it and still held: an engine from before sessions could
+				// take it, or one stuck. Stopped, it saves and lets go.
+				if (engine.isTakingOver) {
+					const int64_t waited = monotonicNs() - engine.takeoverSinceNs;
+					if (waited > 500000000LL && !engine.isHolderStopped) {
+						engine.isHolderStopped = true;
+						stopHolder(&engine);
+					} else if (waited > 6000000000LL) {
+						endTakeover(&engine);
+						emit("@notyielded");
+					}
 				}
-				sleepMs(50);
+				sleepMs(20);
 				continue;
 			}
 			endTakeover(&engine);

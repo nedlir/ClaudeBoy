@@ -99,8 +99,8 @@ somewhere else.
 
 One session at a time plays a given game. When another session has it, the
 pane asks "Would you like to play it here?": 1 or Enter on Yes, 0 or Enter on
-No, or move between them with the arrows. Yes makes the other session save
-and hand the game over (it says where the game went); No stays out for the
+No, or move between them with the arrows. Yes takes it: the other session
+saves and lets go at once, and says where the game went. No stays out for the
 rest of the turn.
 
 ## Where the game shows
