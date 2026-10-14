@@ -125,7 +125,7 @@ rest of the turn.
   back early. Click the console if it doesn't take the keyboard by itself.
   It uses X11, or XWayland on Wayland desktops, loaded only when needed.
   It shows only while the terminal tab holding the session is in front.
-  Switch to another app or another tab and it goes; come back and it
+  Switch to another app or another tab and it goes at once; come back and it
   returns, leaving the keyboard where it was. ClaudeBoy learns this from the
   desktop's accessibility bus (AT-SPI), which GNOME Terminal, Konsole and
   most terminals report to. It recognizes its own tab by a short id the pane

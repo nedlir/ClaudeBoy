@@ -839,12 +839,22 @@ void gameWindowShow(struct GameWindow* window, bool isActivating) {
 }
 
 // Fades out, then unmaps; the keys let go at once
-void gameWindowHide(struct GameWindow* window) {
+void gameWindowHide(struct GameWindow* window, bool isInstant) {
 	window->keys = 0;
 	window->mouseKeys = 0;
 	window->isSpeedHeld = false;
 	memset(window->pressed, 0, sizeof(window->pressed));
-	if (!window->isShown || window->fade < 0) {
+	if (!window->isShown) {
+		return;
+	}
+	if (isInstant) {
+		X.UnmapWindow(window->display, window->window);
+		X.Flush(window->display);
+		window->isShown = false;
+		window->fade = 0;
+		return;
+	}
+	if (window->fade < 0) {
 		return;
 	}
 	window->fade = -1;

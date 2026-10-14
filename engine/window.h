@@ -40,7 +40,8 @@ struct GameWindowEvents {
 struct GameWindow* gameWindowOpen(int scale, char* error, size_t errorSize);
 // Shows the window; `isActivating` asks for the keyboard for it too
 void gameWindowShow(struct GameWindow* window, bool isActivating);
-void gameWindowHide(struct GameWindow* window);
+// Hides the window, fading out, or at once when `isInstant`
+void gameWindowHide(struct GameWindow* window, bool isInstant);
 void gameWindowSetTitle(struct GameWindow* window, const char* utf8);
 // The speed the console's speed button shows
 void gameWindowSetSpeed(struct GameWindow* window, int speed);

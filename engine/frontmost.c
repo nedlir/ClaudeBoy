@@ -339,7 +339,7 @@ static void* watch(void* unused) {
 		}
 		if (!terminal) {
 			atomic_store(&state, FRONTMOST_UNKNOWN);
-			sleepMs(150);
+			sleepMs(100);
 			continue;
 		}
 		const int front = inFront(terminal);
@@ -352,7 +352,7 @@ static void* watch(void* unused) {
 		} else {
 			atomic_store(&state, front ? FRONTMOST_IN_FRONT : FRONTMOST_BEHIND);
 		}
-		sleepMs(150);
+		sleepMs(100);
 	}
 	return NULL;
 }

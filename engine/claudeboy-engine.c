@@ -1596,7 +1596,7 @@ static void tendWindow(struct Engine* engine) {
 	} else {
 		engine->behindSinceNs = 0;
 	}
-	const bool isTerminalBehind = engine->behindSinceNs && monotonicNs() - engine->behindSinceNs > 400000000LL;
+	const bool isTerminalBehind = engine->behindSinceNs && monotonicNs() - engine->behindSinceNs > 250000000LL;
 	if (isWanted && engine->isPlaying && !isTerminalBehind) {
 		if (!engine->hasShownSincePlay) {
 			frontmostNoteShown();
@@ -1604,7 +1604,9 @@ static void tendWindow(struct Engine* engine) {
 		gameWindowShow(engine->window, !engine->hasShownSincePlay);
 		engine->hasShownSincePlay = true;
 	} else {
-		gameWindowHide(engine->window);
+		// Gone at once when another window or tab comes in front: a fade would
+		// linger over it
+		gameWindowHide(engine->window, isTerminalBehind);
 	}
 	if (engine->wanted.title[0] && strcmp(engine->wanted.title, engine->windowTitle) != 0) {
 		snprintf(engine->windowTitle, sizeof(engine->windowTitle), "%s", engine->wanted.title);
