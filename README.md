@@ -1,4 +1,8 @@
-# ClaudeBoy
+<h1 align="center">ClaudeBoy</h1>
+
+<p align="center">
+  <img src="assets/claudeboy.png" width="544" alt="ClaudeBoy, an orange Game Boy, showing a Pokémon-style battle: A wild Claude appears!">
+</p>
 
 A Claude Code mod that drops you into a Game Boy game while Claude works, and
 hands you back when it's done. Everything runs on your machine: the emulator is
@@ -209,3 +213,11 @@ claude plugin test .
 
 mGBA is MPL-2.0. Its source is fetched by `scripts/build.sh` and built into
 `dist/claudeboy-engine`. ROMs aren't included. Use games you own.
+
+## Demo
+
+ClaudeBoy at play while Claude works, at twice the speed:
+
+<p align="center">
+  <img src="assets/demo.gif" width="800" alt="Claude works on a prompt in the terminal while the game plays in ClaudeBoy beside it, at twice the speed">
+</p>
