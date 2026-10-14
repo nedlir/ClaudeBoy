@@ -48,6 +48,8 @@ const SLOW = { timeoutMs: 30_000 }
 type World = {
   opens: number
   openColumns: (number | undefined)[]
+  // Whether each open lets Esc close the pane
+  closeOnEscape: (boolean | undefined)[]
   closes: number
   spawns: (readonly string[])[]
   controls: string[]
@@ -75,6 +77,7 @@ function stubClaudeCode(
   const world: World = {
     opens: 0,
     openColumns: [],
+    closeOnEscape: [],
     closes: 0,
     spawns: [],
     controls: [],
@@ -92,6 +95,7 @@ function stubClaudeCode(
   on('ui.open', ($, e) => {
     world.opens += 1
     world.openColumns.push(e.columns)
+    world.closeOnEscape.push(e.closeOnEscape)
     return { value: isPlaced(world.opens) ? { isPlaced: true } : { isPlaced: false, reason: 'narrow' } }
   })
   on('ui.close', () => {
@@ -581,7 +585,7 @@ test('in a terminal without pictures, the game plays in a drawer, the pane makin
 
   await finishTurn($)
   await clock.advance(1000)
-  expect(titleOf(world.control())).toMatch(/^Pokemon Yellow · Claude's done · back in 2\n/)
+  expect(titleOf(world.control())).toMatch(/^Pokemon Yellow · Claude's done · back in 2 · Esc keeps playing\n/)
   await clock.advance(2000)
   expect(world.control()).toMatch(/^play=0 .*view=none /)
 })
@@ -677,4 +681,52 @@ test('in a maximized terminal the console is laid over the pane, made wide enoug
   // two status rows
   expect(world.control()).toContain(' overlay=64,1,56,23 ')
   expect(await game.find({ text: /Click the game to play/ })).toBeDefined()
+})
+
+test('the countdown shows on the game; Esc on the console keeps playing, and the next Esc goes back', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on, clock, { env: { DISPLAY: ':0' } })
+  await startSession($)
+
+  await $.turn.start({ turnId: 't1', text: 'refactor auth' })
+  await clock.advance(2000)
+  world.engine.push('@focus 1')
+  await finishTurn($)
+  expect(world.control()).toContain(' countdown=3')
+  await clock.advance(1000)
+  expect(world.control()).toContain(' countdown=2')
+
+  // Esc on the console: the count stops and the game goes on
+  world.engine.push('@closed')
+  await clock.settle()
+  expect(world.control()).not.toContain('countdown=')
+  expect(titleOf(world.control())).toMatch(/^Pokemon Yellow · Still playing · Esc goes back to Claude\n/)
+  await clock.advance(5000)
+  expect(world.control()).toMatch(/^play=1 .*view=window /)
+  expect(world.closes).toBe(0)
+
+  // Esc again: back to Claude
+  world.engine.push('@closed')
+  await clock.settle()
+  expect(world.control()).toMatch(/^play=0 .*view=none /)
+  expect(world.closes).toBe(1)
+})
+
+test('in the pane, Esc goes back to Claude, and the countdown shows on the game', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on, clock)
+  await startSession($)
+
+  await $.turn.start({ turnId: 't1', text: 'refactor auth' })
+  await clock.advance(2000)
+  // Esc closes the pane as the person's close; during the countdown the
+  // ui.close hook refuses that and keeps playing
+  expect(world.closeOnEscape.at(-1)).toBe(true)
+  await finishTurn($)
+  expect(world.control()).toContain(' countdown=3')
+  await clock.advance(1000)
+  expect(world.control()).toContain(' countdown=2')
+  await clock.advance(2000)
+  expect(world.control()).toMatch(/^play=0 /)
+  expect(world.control()).not.toContain('countdown=')
 })

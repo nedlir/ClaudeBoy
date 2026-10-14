@@ -6,9 +6,10 @@ hands you back when it's done. Everything runs on your machine: the emulator is
 no server or account.
 
 When Claude has been working for two seconds, a pane opens beside the
-transcript with your game, right where you left it. When Claude finishes
-there's a three-second countdown, then the game pauses, **saves itself**, and
-you're handed back. If Claude needs you, for a permission prompt or a question,
+transcript with your game, right where you left it. When Claude finishes, a
+three-second countdown runs on the game's screen, then the game pauses,
+**saves itself**, and you're handed back. Press Esc during the countdown to
+stay in the game; press Esc again when you're ready to go back to Claude. If Claude needs you, for a permission prompt or a question,
 you're handed back at once and dropped in again after you answer. In auto mode
 the classifier answers most prompts, so play goes on through those.
 
@@ -47,8 +48,7 @@ Game Boy and Game Boy Color games both work. It was built against Pokémon Yello
 ## Playing
 
 Click the game to give it the keys: the picture in the pane, or the console.
-In the pane, Esc hands the keys back to the prompt; on the console, Esc hands
-you back to Claude.
+Esc hands you back to Claude, or, during the countdown, keeps you playing.
 
 | Game Boy | Key |
 | :- | :- |

@@ -153,6 +153,9 @@ struct Control {
 	// A box of the terminal's cells to lay the window over: column, row,
 	// columns, rows; no columns, none
 	int overlay[4];
+	// Seconds left before Claude has the person back, drawn over the game's
+	// screen; 0, none
+	int countdown;
 };
 
 struct Command {
@@ -209,6 +212,9 @@ struct Engine {
 	int shownBoxWidth;
 	int shownBoxHeight;
 	int64_t lastShownNs;
+	// The count on the screen, and since when, for its bar running down
+	int countdownShown;
+	int64_t countdownSinceNs;
 	unsigned seq;
 	unsigned shmFrames;
 
@@ -883,6 +889,92 @@ static void removeShmFrames(struct Engine* engine) {
 	}
 }
 
+// --- The countdown ---------------------------------------------------------
+
+// Five by seven, for the countdown's words and its digit
+static const struct {
+	char c;
+	uint8_t rows[7];
+} GLYPHS[] = {
+	{ 'A', { 14, 17, 17, 31, 17, 17, 17 } }, { 'B', { 30, 17, 17, 30, 17, 17, 30 } },
+	{ 'C', { 14, 17, 16, 16, 16, 17, 14 } }, { 'D', { 30, 17, 17, 17, 17, 17, 30 } },
+	{ 'E', { 31, 16, 16, 30, 16, 16, 31 } }, { 'G', { 14, 17, 16, 23, 17, 17, 15 } },
+	{ 'I', { 14, 4, 4, 4, 4, 4, 14 } },      { 'K', { 17, 18, 20, 24, 20, 18, 17 } },
+	{ 'L', { 16, 16, 16, 16, 16, 16, 31 } }, { 'N', { 17, 25, 21, 19, 17, 17, 17 } },
+	{ 'O', { 14, 17, 17, 17, 17, 17, 14 } }, { 'P', { 30, 17, 17, 30, 16, 16, 16 } },
+	{ 'S', { 15, 16, 16, 14, 1, 1, 30 } },   { 'T', { 31, 4, 4, 4, 4, 4, 4 } },
+	{ 'U', { 17, 17, 17, 17, 17, 17, 14 } }, { 'Y', { 17, 17, 10, 4, 4, 4, 4 } },
+	{ '1', { 4, 12, 4, 4, 4, 4, 14 } },      { '2', { 14, 17, 1, 2, 4, 8, 31 } },
+	{ '3', { 31, 2, 4, 2, 1, 17, 14 } },     { '4', { 2, 6, 10, 18, 31, 2, 2 } },
+	{ '5', { 31, 16, 30, 1, 1, 17, 14 } },   { '6', { 6, 8, 16, 30, 17, 17, 14 } },
+	{ '7', { 31, 1, 2, 4, 8, 8, 8 } },       { '8', { 14, 17, 17, 14, 17, 17, 14 } },
+	{ '9', { 14, 17, 17, 15, 1, 2, 12 } },
+};
+
+// The core's colors are 0x00BBGGRR
+#define CORE_COLOR(rgb) ((color_t) ((((rgb) >> 16) & 0xFF) | ((rgb) & 0xFF00) | (((rgb) & 0xFF) << 16)))
+
+static void fillRect(color_t* frame, int x, int y, int width, int height, color_t color) {
+	for (int row = y; row < y + height; row++) {
+		for (int column = x; column < x + width; column++) {
+			if (row >= 0 && row < HEIGHT && column >= 0 && column < WIDTH) {
+				frame[row * WIDTH + column] = color;
+			}
+		}
+	}
+}
+
+static void drawText(color_t* frame, int x, int y, int scale, const char* text, color_t color) {
+	for (; *text; text++, x += 6 * scale) {
+		for (size_t i = 0; i < sizeof(GLYPHS) / sizeof(GLYPHS[0]); i++) {
+			if (GLYPHS[i].c != *text) {
+				continue;
+			}
+			for (int row = 0; row < 7; row++) {
+				for (int column = 0; column < 5; column++) {
+					if (GLYPHS[i].rows[row] & (16 >> column)) {
+						fillRect(frame, x + column * scale, y + row * scale, scale, scale, color);
+					}
+				}
+			}
+		}
+	}
+}
+
+static void drawCentered(color_t* frame, int y, int scale, const char* text, color_t color) {
+	const int width = (int) strlen(text) * 6 * scale - scale;
+	drawText(frame, (WIDTH - width) / 2, y, scale, text, color);
+}
+
+// The seconds left over the game, dimmed behind them: a panel with the count,
+// a bar running down through the second, and what Esc does
+static void drawCountdown(color_t* frame, int seconds, double elapsed) {
+	for (int i = 0; i < WIDTH * HEIGHT; i++) {
+		const color_t pixel = frame[i];
+		frame[i] = (color_t) ((((pixel & 0xFF) * 3 / 10) & 0xFF) | ((((pixel >> 8) & 0xFF) * 3 / 10) << 8) |
+		                      ((((pixel >> 16) & 0xFF) * 3 / 10) << 16));
+	}
+	const color_t orange = CORE_COLOR(0xD97757);
+	const color_t panel = CORE_COLOR(0x2A2321);
+	const color_t cream = CORE_COLOR(0xF6E7DC);
+	const color_t dim = CORE_COLOR(0x8C7C74);
+	// The panel, its corners cut, edged in orange
+	fillRect(frame, 18, 22, 124, 100, orange);
+	fillRect(frame, 20, 24, 120, 96, panel);
+	fillRect(frame, 18, 22, 1, 1, 0);
+	fillRect(frame, 141, 22, 1, 1, 0);
+	fillRect(frame, 18, 121, 1, 1, 0);
+	fillRect(frame, 141, 121, 1, 1, 0);
+	drawCentered(frame, 31, 1, "BACK TO CLAUDE", cream);
+	const char digit[2] = { (char) ('0' + seconds), 0 };
+	drawCentered(frame, 45, 6, digit, orange);
+	// The bar: full as the second starts, empty as it ends
+	const double left = elapsed < 0 ? 1 : elapsed > 1 ? 0 : 1 - elapsed;
+	fillRect(frame, 32, 94, 96, 4, CORE_COLOR(0x4A3A34));
+	fillRect(frame, 32, 94, (int) (96 * left + 0.5), 4, orange);
+	drawCentered(frame, 106, 1, "ESC KEEPS PLAYING", dim);
+}
+
 // Hands the mod the newest frame as it asked for frames, at most at its frame
 // rate and only when the picture changed, unless `isForced`
 static void showFrame(struct Engine* engine, bool isForced) {
@@ -896,6 +988,13 @@ static void showFrame(struct Engine* engine, bool isForced) {
 	                       wanted->boxHeight != engine->shownBoxHeight;
 	static color_t frame[WIDTH * HEIGHT];
 	copyFrame(engine, frame);
+	if (wanted->countdown != engine->countdownShown) {
+		engine->countdownShown = wanted->countdown;
+		engine->countdownSinceNs = now;
+	}
+	if (wanted->countdown > 0) {
+		drawCountdown(frame, wanted->countdown, (double) (now - engine->countdownSinceNs) / 1e9);
+	}
 	if (!isForced && !isNewView && engine->hasShown) {
 		int fps = clampInt(wanted->fps, 1, 60);
 		if (wanted->view == VIEW_IMAGE) {
@@ -949,6 +1048,19 @@ static void showFrame(struct Engine* engine, bool isForced) {
 	engine->shownRows = wanted->rows;
 	engine->shownBoxWidth = wanted->boxWidth;
 	engine->shownBoxHeight = wanted->boxHeight;
+}
+
+// The folder the mod and the engine share goes with the engine: the control
+// file, the cells file, then the folder, if nothing else is in it
+static void removeRunDir(const struct Engine* engine) {
+	if (!engine->run[0]) {
+		return;
+	}
+	char path[PATH_MAX];
+	snprintf(path, sizeof(path), "%s/cells", engine->run);
+	unlink(path);
+	unlink(engine->control);
+	rmdir(engine->run);
 }
 
 // --- Sound -----------------------------------------------------------------
@@ -1138,6 +1250,8 @@ static void parseControl(char* line, struct Control* control, struct Command* co
 			control->isSoundOn = atoi(value) != 0;
 		} else if (!strcmp(token, "speed")) {
 			control->speed = clampInt(atoi(value), 1, 8);
+		} else if (!strcmp(token, "countdown")) {
+			control->countdown = clampInt(atoi(value), 0, 9);
 		} else if (!strcmp(token, "overlay")) {
 			sscanf(value, "%d,%d,%d,%d", &control->overlay[0], &control->overlay[1], &control->overlay[2], &control->overlay[3]);
 		} else if (!strcmp(token, "title")) {
@@ -1556,6 +1670,7 @@ static int play(const char* romPath, const char* saves, const char* run) {
 	if (engine.window) {
 		gameWindowClose(engine.window);
 	}
+	removeRunDir(&engine);
 	closeGame(&engine);
 	if (engine.tty >= 0) {
 		close(engine.tty);

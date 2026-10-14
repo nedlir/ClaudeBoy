@@ -109,7 +109,8 @@ let game: Game | null = null
 //   offered   the terminal was too narrow for the pane to open by itself, so
 //             the band above the prompt offers a key that opens it
 //   playing   the pane is open and the game runs
-//   countdown Claude is done; handing back when the count reaches zero
+//   countdown Claude is done; handing back when the count reaches zero, the
+//             count on the game's screen. Esc keeps playing instead.
 let phase: Phase = 'idle'
 let isTurnRunning = false
 // Closed by hand during this turn, so stay out until the next one
@@ -130,7 +131,7 @@ let busyUntil = 0
 let awayTimer: Timer | null = null
 let commands: Command[] = []
 let nextCommandId = 1
-let wanted = { isPlaying: false, keys: 0, taps: [0, 0, 0, 0, 0, 0, 0, 0], view: 'none', speed: 1, overlay: 'none' }
+let wanted = { isPlaying: false, keys: 0, taps: [0, 0, 0, 0, 0, 0, 0, 0], view: 'none', speed: 1, overlay: 'none', countdown: 0 }
 let controlWrite: Promise<void> | null = null
 let isControlDirty = false
 // Set when play pauses, so the save that follows can be told
@@ -299,7 +300,7 @@ async function dropIn($: Dollar) {
 }
 
 function openPane($: Dollar) {
-  return $.ui.open({ id: PANE, title: game?.title ?? 'ClaudeBoy', focus: true, columns: DOCK_COLUMNS, rows: INLINE_ROWS })
+  return $.ui.open({ id: PANE, title: game?.title ?? 'ClaudeBoy', focus: true, closeOnEscape: true, columns: DOCK_COLUMNS, rows: INLINE_ROWS })
 }
 
 // The columns the drawer covers, when the terminal fills the desktop's width
@@ -317,7 +318,13 @@ function drawerColumns(): number {
 // the drawer, so the transcript moves aside rather than under it. It never
 // takes the keys: they go to the drawer. Where it doesn't fit, it stays shut.
 async function openDrawerPane($: Dollar) {
-  const opened = await $.ui.open({ id: PANE, title: game?.title ?? 'ClaudeBoy', columns: drawerColumns(), rows: STATUS_ROWS + 2 })
+  const opened = await $.ui.open({
+    id: PANE,
+    title: game?.title ?? 'ClaudeBoy',
+    closeOnEscape: true,
+    columns: drawerColumns(),
+    rows: STATUS_ROWS + 2,
+  })
   if (!opened.isPlaced) await $.ui.close({ id: PANE })
 }
 
@@ -361,12 +368,29 @@ async function handBack($: Dollar, why: string) {
 function startCountdown($: Dollar) {
   phase = 'countdown'
   countdown = COUNTDOWN_SECONDS
+  wanted.countdown = countdown
   redraw($)
+  scheduleControl($)
   timer = $.clock.every(1000, () => {
     countdown -= 1
-    if (countdown > 0) redraw($)
-    else void handBack($, "Claude's done")
+    wanted.countdown = Math.max(0, countdown)
+    if (countdown > 0) {
+      redraw($)
+      scheduleControl($)
+    } else void handBack($, "Claude's done")
   })
+}
+
+// Esc during the countdown: stay in the game. The next Esc goes back to
+// Claude, and the next turn's end counts down again.
+function keepPlaying($: Dollar) {
+  cancelTimer()
+  phase = 'playing'
+  wanted.countdown = 0
+  // Not when a queued prompt started a turn: Claude is working again
+  if (!isTurnRunning) showMessage($, 'Still playing · Esc goes back to Claude')
+  redraw($)
+  scheduleControl($)
 }
 
 // Leaving the pane, whoever closes it: pause, which saves the game
@@ -384,7 +408,7 @@ function goAway($: Dollar, why: string) {
   picker = null
   forgetPicture()
   hasWindowFocus = false
-  wanted = { ...wanted, isPlaying: false, keys: 0, view: 'none', speed: 1 }
+  wanted = { ...wanted, isPlaying: false, keys: 0, view: 'none', speed: 1, countdown: 0 }
   if (!engine) return
   if (wasPlaying) {
     toastWhenPaused = why
@@ -523,7 +547,12 @@ function onEngineLine($: Dollar, line: string) {
       redraw($)
       break
     case '@closed':
-      // Esc in the drawer, or it was closed: as closing the pane
+      // Esc on the console during the countdown keeps playing; otherwise, or
+      // when it was closed, as closing the pane
+      if (phase === 'countdown') {
+        keepPlaying($)
+        break
+      }
       if (isTurnRunning) isDismissed = true
       void handBack($, '')
       break
@@ -572,6 +601,8 @@ function controlLine(): string {
     'sound=' + (isSoundOn ? 1 : 0),
     'speed=' + wanted.speed,
   ]
+  // The engine draws the count over the game's screen
+  if (wanted.countdown > 0) fields.push('countdown=' + wanted.countdown)
   if (wanted.view === 'window') {
     fields.push('overlay=' + wanted.overlay)
     fields.push('title=' + base64(new TextEncoder().encode(windowTitle())))
@@ -667,13 +698,14 @@ function redraw($: Dollar) {
 
 // What's going on, for the line under the picture or the window's title
 function statusLine(): { text: string; isStrong: boolean } {
-  if (phase === 'countdown') return { text: "Claude's done · back in " + countdown, isStrong: true }
+  if (phase === 'countdown') return { text: "Claude's done · back in " + countdown + ' · Esc keeps playing', isStrong: true }
   if (picker) return { text: (picker === 'save' ? 'Save to' : 'Load') + ' which slot? 1–9, any other key cancels', isStrong: true }
   if (message) return { text: message, isStrong: false }
   if (wanted.view === 'window' ? !hasWindowFocus : !hasKeys) {
-    return { text: wanted.view === 'window' ? 'Click here to play' : 'Click the game to play · Esc hands the keys back', isStrong: true }
+    return { text: wanted.view === 'window' ? 'Click here to play' : 'Click the game to play · Esc goes back to Claude', isStrong: true }
   }
-  return { text: (isOpenedByCommand ? 'Playing' : 'Claude is working') + ' · ' + CONTROLS, isStrong: false }
+  const doing = isOpenedByCommand ? 'Playing' : isTurnRunning ? 'Claude is working' : "Claude's done · Esc goes back"
+  return { text: doing + ' · ' + CONTROLS, isStrong: false }
 }
 
 function hintLine(): string {
@@ -1082,9 +1114,7 @@ export const register: Register = (on) => {
     }
     if (phase === 'countdown') {
       // A queued prompt started straight away, so keep playing
-      cancelTimer()
-      phase = 'playing'
-      redraw($)
+      keepPlaying($)
     }
     armDropIn($)
     return next(e)
@@ -1121,6 +1151,14 @@ export const register: Register = (on) => {
   // The person closed the pane (this module's own closes go through handBack)
   on('ui.close', async ($, e, next) => {
     if (e.id !== PANE) return next(e)
+    // Esc during the countdown keeps playing: the pane stays open
+    if (e.origin?.kind === 'person' && phase === 'countdown') {
+      keepPlaying($)
+      // Opened again, so the next Esc closes it: a refused close spends it
+      if (pictureMode() === 'window') await openDrawerPane($)
+      else await openPane($)
+      return { value: undefined }
+    }
     if (e.origin?.kind === 'person' && isTurnRunning && !isWelcomeOpen) isDismissed = true
     goAway($, '')
     return next(e)
