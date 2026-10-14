@@ -10,8 +10,9 @@
 // terminal shows, or in kitty and Ghostty as pictures in shared memory, drawn
 // at the very size the terminal shows them. Either way the picture fills the
 // pane at the screen's own shape and follows it as the pane or terminal resizes.
-// In terminals without pictures, on a desktop, the game plays in a window of
-// its own instead, sharp, its title saying what's going on.
+// In terminals without pictures, on a desktop, the game plays in a drawer of
+// its own at the right edge of the screen instead, sharp, and the pane opens
+// as wide as the drawer so the transcript moves aside rather than under it.
 
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
@@ -91,6 +92,10 @@ let hasDesktop = false
 // A cell's size in pixels, as the engine last read the terminal's; zero while
 // the terminal doesn't say
 let cell = { width: 0, height: 0 }
+// The terminal's width in cells, and the drawer's and the desktop's in pixels:
+// how many columns the pane takes to make room for the drawer
+let terminalColumns = 0
+let drawer = { width: 0, workWidth: 0 }
 
 let game: Game | null = null
 
@@ -272,6 +277,7 @@ async function dropIn($: Dollar) {
     return
   }
   if (pictureMode() === 'window') {
+    await openDrawerPane($)
     await startPlaying($)
     return
   }
@@ -290,6 +296,20 @@ async function dropIn($: Dollar) {
 
 function openPane($: Dollar) {
   return $.ui.open({ id: PANE, title: game?.title ?? 'ClaudeBoy', focus: true, columns: DOCK_COLUMNS, rows: INLINE_ROWS })
+}
+
+// The columns the drawer covers, when the terminal fills the desktop's width
+function drawerColumns(): number {
+  if (drawer.width <= 0 || drawer.workWidth <= 0 || terminalColumns <= 0) return DOCK_COLUMNS
+  return Math.ceil((drawer.width * terminalColumns) / drawer.workWidth) + 1
+}
+
+// While the drawer is out, the pane opens beside the transcript as wide as
+// the drawer, so the transcript moves aside rather than under it. It never
+// takes the keys: they go to the drawer. Where it doesn't fit, it stays shut.
+async function openDrawerPane($: Dollar) {
+  const opened = await $.ui.open({ id: PANE, title: game?.title ?? 'ClaudeBoy', columns: drawerColumns(), rows: STATUS_ROWS + 2 })
+  if (!opened.isPlaced) await $.ui.close({ id: PANE })
 }
 
 async function acceptOffer($: Dollar) {
@@ -445,9 +465,15 @@ function onEngineLine($: Dollar, line: string) {
       // Resized, or another font: the picture is laid out anew
       const [columns = 0, rows = 0, width = 0, height = 0] = words.map(Number)
       cell = columns > 0 && rows > 0 && width > 0 && height > 0 ? { width: width / columns, height: height / rows } : { width: 0, height: 0 }
+      terminalColumns = columns
       redraw($)
       break
     }
+    case '@drawer':
+      drawer = { width: Number(words[0]) || 0, workWidth: Number(words[1]) || 0 }
+      // Sized now the drawer is: the pane makes room to match
+      if (wanted.view === 'window' && (phase === 'playing' || phase === 'countdown')) void openDrawerPane($)
+      break
     case '@done': {
       const index = commands.findIndex((command) => command.id === Number(words[0]))
       if (index < 0) break
@@ -480,9 +506,9 @@ function onEngineLine($: Dollar, line: string) {
       redraw($)
       break
     case '@closed':
-      // The person closed the window, as they'd close the pane
+      // Esc in the drawer, or it was closed: as closing the pane
       if (isTurnRunning) isDismissed = true
-      goAway($, '')
+      void handBack($, '')
       break
     case '@nowindow':
       void noWindow($, words.join(' '))
@@ -631,13 +657,17 @@ function statusLine(): { text: string; isStrong: boolean } {
 
 function hintLine(): string {
   if (picker) return SLOTS.map((slot) => slot + ' ' + (slotTimes[slot] ? ago(slotTimes[slot]) : '–')).join(' · ')
+  if (wanted.view === 'window') {
+    // The drawer's line is short: X's font is wide
+    return 'S save · L load · M sound ' + (isSoundOn ? 'off' : 'on') + ' · F ' + (nextSpeed() > 1 ? '×' + nextSpeed() : '×1') + ' · Esc back'
+  }
   return 'S save · L load · M sound ' + (isSoundOn ? 'off' : 'on') + ' · F ' + (nextSpeed() > 1 ? 'speed ×' + nextSpeed() : 'normal speed')
 }
 
-// The window's title: the game, then what's going on, then what keys do
+// The drawer's two lines under the game: what's going on, then what keys do
 function windowTitle(): string {
   const status = statusLine().text.replace(' · ' + CONTROLS, '')
-  return (game?.title ?? 'ClaudeBoy') + ' · ' + status + ' · ' + hintLine()
+  return (game?.title ?? 'ClaudeBoy') + ' · ' + status + '\n' + hintLine()
 }
 
 // The biggest picture that fits above the status lines at the screen's own
@@ -867,10 +897,8 @@ async function playNow($: Dollar) {
   cancelTimer()
   phase = 'idle'
   if (pictureMode() === 'window') {
-    if (isWelcomeOpen) {
-      isWelcomeOpen = false
-      await $.ui.close({ id: PANE })
-    }
+    isWelcomeOpen = false
+    await openDrawerPane($)
     await startPlaying($)
     return {}
   }
@@ -1154,7 +1182,19 @@ export const register: Register = (on) => {
     if (engineError && !engine) return <Text>{engineError}</Text>
 
     const mode = pictureMode()
-    if (mode === 'window') return <Text dimColor>{game?.title ?? 'The game'} plays in its own window.</Text>
+    if (mode === 'window') {
+      const { text, isStrong } = statusLine()
+      return (
+        <Box flexDirection="column">
+          <Text bold={isStrong} wrap="truncate-end">
+            {text === 'Click here to play' ? 'Click the drawer to play' : text}
+          </Text>
+          <Text dimColor wrap="truncate-end">
+            {(game?.title ?? 'The game') + ' is in the drawer → · ' + hintLine()}
+          </Text>
+        </Box>
+      )
+    }
     const room = layout(e.props.bodyColumns, e.props.scroll.bodyRows, mode)
     const view = mode === 'image' ? 'image:' + room.width + 'x' + room.height : 'cells:' + room.columns + 'x' + room.rows
     size = room

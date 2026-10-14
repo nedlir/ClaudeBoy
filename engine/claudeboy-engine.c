@@ -60,7 +60,8 @@ static const char USAGE[] =
 	"        @playing, @paused\n"
 	"        @busy                           another session is playing it\n"
 	"        @key <letter or digit>          typed in the game's window\n"
-	"        @closed                         the person closed the window\n"
+	"        @closed                         the person closed the window (Esc)\n"
+	"        @drawer <width> <desktop-width> the window's width, in pixels\n"
 	"        @focus 1|0                      the window got or lost the keys\n"
 	"        @nowindow <words>               no window can open here\n"
 	"        @log <words>, @error <words>\n"
@@ -1318,6 +1319,10 @@ static void tendWindow(struct Engine* engine) {
 			return;
 		}
 		engine->windowTitle[0] = '\0';
+		int width;
+		int workWidth;
+		gameWindowDrawer(engine->window, &width, &workWidth);
+		emit("@drawer %d %d", width, workWidth);
 	}
 	if (!engine->window) {
 		return;

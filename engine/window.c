@@ -1,5 +1,6 @@
 // The game window, on X11 through libX11 and libXext loaded when it's first
-// opened. The few Xlib types it uses are declared here as Xlib.h has them, so
+// opened. It's a drawer: no title bar, docked to the right edge of the desktop
+// and as tall as it, the game in the middle and what's going on under it. The few Xlib types it uses are declared here as Xlib.h has them, so
 // building needs no X11 headers; without X11, or a display, it doesn't open
 // and the engine says so.
 
@@ -178,7 +179,11 @@ enum {
 #define XA_ATOM 4
 #define XA_CARDINAL 6
 #define USPosition (1L << 0)
+#define USSize (1L << 1)
+#define PPosition (1L << 2)
+#define PSize (1L << 3)
 #define PMinSize (1L << 4)
+#define PMaxSize (1L << 5)
 #define PResizeInc (1L << 6)
 #define PAspect (1L << 7)
 #define PBaseSize (1L << 8)
@@ -192,6 +197,15 @@ static struct {
 	Visual* (*DefaultVisual)(Display*, int);
 	int (*DefaultDepth)(Display*, int);
 	int (*DisplayHeight)(Display*, int);
+	int (*DisplayWidth)(Display*, int);
+	int (*GetWindowProperty)(Display*, Window, Atom, long, long, Bool, Atom, Atom*, int*, unsigned long*, unsigned long*,
+	                         unsigned char**);
+	int (*Free)(void*);
+	GC (*CreateGC)(Display*, Window, unsigned long, void*);
+	XID (*LoadFont)(Display*, const char*);
+	int (*SetFont)(Display*, GC, XID);
+	int (*SetForeground)(Display*, GC, unsigned long);
+	int (*DrawString)(Display*, Window, GC, int, int, const char*, int);
 	GC (*DefaultGC)(Display*, int);
 	Window (*CreateSimpleWindow)(Display*, Window, int, int, unsigned, unsigned, unsigned, unsigned long, unsigned long);
 	int (*DestroyWindow)(Display*, Window);
@@ -248,6 +262,14 @@ static bool loadX11(char* error, size_t errorSize) {
 		FROM(x11, DefaultVisual, true),
 		FROM(x11, DefaultDepth, true),
 		FROM(x11, DisplayHeight, true),
+		FROM(x11, DisplayWidth, true),
+		FROM(x11, GetWindowProperty, true),
+		FROM(x11, Free, true),
+		FROM(x11, CreateGC, true),
+		FROM(x11, LoadFont, true),
+		FROM(x11, SetFont, true),
+		FROM(x11, SetForeground, true),
+		FROM(x11, DrawString, true),
 		FROM(x11, DefaultGC, true),
 		FROM(x11, CreateSimpleWindow, true),
 		FROM(x11, DestroyWindow, true),
@@ -327,7 +349,34 @@ struct GameWindow {
 	int redShift;
 	int greenShift;
 	int blueShift;
+
+	// Where the drawer docks, the width of the desktop it docks in, and the
+	// two lines of status it shows under the game, in Latin-1 for X's fonts
+	int dockX;
+	int dockY;
+	int workWidth;
+	Atom wmStates[3];
+	GC textGc;
+	bool hasFont;
+	int lineHeight;
+	int ascent;
+	int charWidth;
+	char lines[2][192];
 };
+
+#define DRAWER_MARGIN 16
+#define DRAWER_COLOR 0x1C1C22u
+#define TEXT_COLOR 0xD8D8E0u
+#define DIM_TEXT_COLOR 0x8C8C98u
+
+static int textArea(const struct GameWindow* window) {
+	return window->hasFont ? 2 * window->lineHeight + 14 : 0;
+}
+
+static unsigned long pixelOf(const struct GameWindow* window, uint32_t rgb) {
+	return ((rgb >> 16) & 0xFF) << window->redShift | ((rgb >> 8) & 0xFF) << window->greenShift |
+	       (rgb & 0xFF) << window->blueShift;
+}
 
 // X errors arrive later than the call that made them: these note the last
 // one, so a failed shared-memory attach can fall back
@@ -394,21 +443,121 @@ static void drawIcon(unsigned long* icon, int size) {
 	}
 }
 
+// The status, two lines apart, as Latin-1 for X's fonts and WM_NAME: what
+// Latin-1 lacks becomes a dash
 static void setTitle(struct GameWindow* window, const char* utf8) {
-	// WM_NAME is Latin-1: the plain characters, for window managers that read it
-	char plain[256];
+	memset(window->lines, 0, sizeof(window->lines));
+	int line = 0;
 	size_t length = 0;
-	for (const unsigned char* c = (const unsigned char*) utf8; *c && length < sizeof(plain) - 1; c++) {
-		if (*c < 0x80) {
-			plain[length++] = (char) *c;
-		} else if ((*c & 0xC0) == 0xC0) {
-			plain[length++] = '-';
+	for (const unsigned char* c = (const unsigned char*) utf8; *c;) {
+		unsigned codepoint = *c++;
+		if (codepoint >= 0xC0) {
+			const int extra = codepoint >= 0xF0 ? 3 : codepoint >= 0xE0 ? 2 : 1;
+			codepoint &= 0x3F >> extra;
+			for (int i = 0; i < extra && (*c & 0xC0) == 0x80; i++) {
+				codepoint = (codepoint << 6) | (*c++ & 0x3F);
+			}
+		}
+		if (codepoint == '\n') {
+			if (line == 0) {
+				line = 1;
+				length = 0;
+			}
+			continue;
+		}
+		if (length < sizeof(window->lines[0]) - 1) {
+			window->lines[line][length++] = (char) (codepoint <= 0xFF ? codepoint : '-');
 		}
 	}
-	plain[length] = '\0';
-	X.StoreName(window->display, window->window, plain);
+	char name[400];
+	snprintf(name, sizeof(name), "%s%s%s", window->lines[0], window->lines[1][0] ? " - " : "", window->lines[1]);
+	X.StoreName(window->display, window->window, name);
+	char joined[512];
+	size_t out = 0;
+	for (const char* c = utf8; *c && out < sizeof(joined) - 4; c++) {
+		if (*c == '\n') {
+			memcpy(joined + out, " \xC2\xB7 ", 4);
+			out += 4;
+		} else {
+			joined[out++] = *c;
+		}
+	}
+	joined[out] = '\0';
 	X.ChangeProperty(window->display, window->window, window->wmName, window->utf8String, 8, PropModeReplace,
-	                 (const unsigned char*) utf8, (int) strlen(utf8));
+	                 (const unsigned char*) joined, (int) out);
+	window->needsDrawing = true;
+}
+
+// The drawer's size, as tall as the work area and wide enough for the game
+// at a whole multiple of its size, and where it docks: the right edge
+static void dock(struct GameWindow* window, int scale) {
+	long area[4] = { 0, 0, X.DisplayWidth(window->display, window->screen), X.DisplayHeight(window->display, window->screen) };
+	Atom type = 0;
+	int format = 0;
+	unsigned long count = 0;
+	unsigned long after = 0;
+	unsigned char* data = NULL;
+	const Atom workArea = X.InternAtom(window->display, "_NET_WORKAREA", 0);
+	if (X.GetWindowProperty(window->display, window->root, workArea, 0, 4, 0, 0, &type, &format, &count, &after, &data) == 0 &&
+	    data) {
+		if (format == 32 && count >= 4) {
+			memcpy(area, data, sizeof(area));
+		}
+		X.Free(data);
+	}
+	const int areaWidth = (int) area[2];
+	const int areaHeight = (int) area[3];
+	if (scale < 1) {
+		// Tall as the desktop allows; never much more than two fifths of its width
+		const int byHeight = (areaHeight - 2 * DRAWER_MARGIN - textArea(window)) / WINDOW_SCREEN_HEIGHT;
+		const int byWidth = (areaWidth * 45 / 100 - 2 * DRAWER_MARGIN) / WINDOW_SCREEN_WIDTH;
+		scale = byHeight < byWidth ? byHeight : byWidth;
+		scale = scale < 2 ? 2 : scale > 8 ? 8 : scale;
+	}
+	window->width = WINDOW_SCREEN_WIDTH * scale + 2 * DRAWER_MARGIN;
+	window->height = areaHeight > 0 ? areaHeight : WINDOW_SCREEN_HEIGHT * scale + 2 * DRAWER_MARGIN + textArea(window);
+	window->dockX = (int) area[0] + areaWidth - window->width;
+	window->dockY = (int) area[1];
+	window->workWidth = areaWidth;
+}
+
+static void setDockHints(struct GameWindow* window) {
+	XSizeHints hints = { 0 };
+	hints.flags = USPosition | PPosition | USSize | PSize | PMinSize | PMaxSize;
+	hints.x = window->dockX;
+	hints.y = window->dockY;
+	hints.width = hints.minWidth = hints.maxWidth = window->width;
+	hints.height = hints.minHeight = hints.maxHeight = window->height;
+	X.SetWMNormalHints(window->display, window->window, &hints);
+}
+
+// X's own fonts: the larger where the server has it
+static void loadFont(struct GameWindow* window) {
+	static const struct {
+		const char* name;
+		int lineHeight;
+		int ascent;
+		int charWidth;
+	} FONTS[] = { { "9x15", 18, 12, 9 }, { "fixed", 15, 10, 6 } };
+	for (size_t i = 0; i < sizeof(FONTS) / sizeof(FONTS[0]); i++) {
+		hasXError = false;
+		const XID font = X.LoadFont(window->display, FONTS[i].name);
+		X.Sync(window->display, 0);
+		if (font && !hasXError) {
+			window->textGc = X.CreateGC(window->display, window->window, 0, NULL);
+			X.SetFont(window->display, window->textGc, font);
+			window->hasFont = true;
+			window->lineHeight = FONTS[i].lineHeight;
+			window->ascent = FONTS[i].ascent;
+			window->charWidth = FONTS[i].charWidth;
+			return;
+		}
+	}
+}
+
+void gameWindowDrawer(struct GameWindow* window, int* width, int* workWidth) {
+	*width = window->width;
+	*workWidth = window->workWidth;
 }
 
 struct GameWindow* gameWindowOpen(int scale, char* error, size_t errorSize) {
@@ -446,14 +595,15 @@ struct GameWindow* gameWindowOpen(int scale, char* error, size_t errorSize) {
 		return NULL;
 	}
 
-	// Big enough to see, small enough to sit beside the terminal
-	if (scale < 1) {
-		const int fit = X.DisplayHeight(display, window->screen) * 55 / 100 / WINDOW_SCREEN_HEIGHT;
-		scale = fit < 2 ? 2 : fit > 6 ? 6 : fit;
-	}
-	window->width = WINDOW_SCREEN_WIDTH * scale;
-	window->height = WINDOW_SCREEN_HEIGHT * scale;
-	window->window = X.CreateSimpleWindow(display, window->root, 0, 0, (unsigned) window->width, (unsigned) window->height, 0, 0, 0);
+	// The font's height sets aside room for the status: sized with a stand-in
+	// window, measured again once the real one exists
+	window->hasFont = true;
+	window->lineHeight = 18;
+	dock(window, scale);
+	window->hasFont = false;
+	window->window = X.CreateSimpleWindow(display, window->root, window->dockX, window->dockY, (unsigned) window->width,
+	                                      (unsigned) window->height, 0, 0, pixelOf(window, DRAWER_COLOR));
+	loadFont(window);
 	X.SelectInput(display, window->window, KeyPressMask | KeyReleaseMask | ExposureMask | StructureNotifyMask | FocusChangeMask);
 
 	window->deleteWindow = X.InternAtom(display, "WM_DELETE_WINDOW", 0);
@@ -466,17 +616,15 @@ struct GameWindow* gameWindowOpen(int scale, char* error, size_t errorSize) {
 	window->wmIcon = X.InternAtom(display, "_NET_WM_ICON", 0);
 	window->wmPid = X.InternAtom(display, "_NET_WM_PID", 0);
 
-	// Resized a whole multiple of the screen at a time, so every pixel is the
-	// same size; maximized, the picture is centered at the largest that fits
-	XSizeHints hints = { 0 };
-	hints.flags = PMinSize | PResizeInc | PBaseSize | PAspect;
-	hints.minWidth = WINDOW_SCREEN_WIDTH;
-	hints.minHeight = WINDOW_SCREEN_HEIGHT;
-	hints.widthInc = WINDOW_SCREEN_WIDTH;
-	hints.heightInc = WINDOW_SCREEN_HEIGHT;
-	hints.minAspect.x = hints.maxAspect.x = WINDOW_SCREEN_WIDTH;
-	hints.minAspect.y = hints.maxAspect.y = WINDOW_SCREEN_HEIGHT;
-	X.SetWMNormalHints(display, window->window, &hints);
+	// A drawer: docked where it's told, its own size, with no title bar,
+	// above the other windows and out of the taskbar
+	setDockHints(window);
+	const Atom motif = X.InternAtom(display, "_MOTIF_WM_HINTS", 0);
+	const unsigned long noDecorations[5] = { 2, 0, 0, 0, 0 };
+	X.ChangeProperty(display, window->window, motif, motif, 32, PropModeReplace, (const unsigned char*) noDecorations, 5);
+	window->wmStates[0] = window->wmStateAbove;
+	window->wmStates[1] = X.InternAtom(display, "_NET_WM_STATE_SKIP_TASKBAR", 0);
+	window->wmStates[2] = X.InternAtom(display, "_NET_WM_STATE_SKIP_PAGER", 0);
 	XClassHint classHint = { "claudeboy", "ClaudeBoy" };
 	X.SetClassHint(display, window->window, &classHint);
 	unsigned long pid = (unsigned long) getpid();
@@ -501,23 +649,11 @@ void gameWindowShow(struct GameWindow* window) {
 	if (window->isShown) {
 		return;
 	}
-	// Kept above other windows while it plays, where it was last
+	// Each time at the right edge, above the other windows
 	X.ChangeProperty(window->display, window->window, window->wmState, XA_ATOM, 32, PropModeReplace,
-	                 (const unsigned char*) &window->wmStateAbove, 1);
-	if (window->hasPosition) {
-		XSizeHints hints = { 0 };
-		hints.flags = USPosition | PMinSize | PResizeInc | PBaseSize | PAspect;
-		hints.x = window->x;
-		hints.y = window->y;
-		hints.minWidth = WINDOW_SCREEN_WIDTH;
-		hints.minHeight = WINDOW_SCREEN_HEIGHT;
-		hints.widthInc = WINDOW_SCREEN_WIDTH;
-		hints.heightInc = WINDOW_SCREEN_HEIGHT;
-		hints.minAspect.x = hints.maxAspect.x = WINDOW_SCREEN_WIDTH;
-		hints.minAspect.y = hints.maxAspect.y = WINDOW_SCREEN_HEIGHT;
-		X.SetWMNormalHints(window->display, window->window, &hints);
-		X.MoveWindow(window->display, window->window, window->x, window->y);
-	}
+	                 (const unsigned char*) window->wmStates, 3);
+	setDockHints(window);
+	X.MoveWindow(window->display, window->window, window->dockX, window->dockY);
 	X.MapRaised(window->display, window->window);
 	X.Flush(window->display);
 	window->isShown = true;
@@ -606,7 +742,10 @@ void gameWindowPump(struct GameWindow* window, struct GameWindowEvents* events) 
 				break;
 			}
 			window->pressed[keycode] = true;
-			if (button >= 0) {
+			if (symbol == 0xFF1B) {
+				// Escape: back to Claude, as closing the drawer
+				events->isClosed = true;
+			} else if (button >= 0) {
 				window->keys |= 1u << button;
 			} else if (((symbol >= 'a' && symbol <= 'z') || (symbol >= '0' && symbol <= '9')) &&
 			           events->typedCount < WINDOW_TYPED_MAX) {
@@ -733,16 +872,19 @@ void gameWindowDraw(struct GameWindow* window, const uint32_t* frame) {
 	}
 	const int width = window->width;
 	const int height = window->height;
-	int scale = width / WINDOW_SCREEN_WIDTH < height / WINDOW_SCREEN_HEIGHT ? width / WINDOW_SCREEN_WIDTH
-	                                                                     : height / WINDOW_SCREEN_HEIGHT;
+	// The game and the status under it, together in the middle of the drawer
+	const int text = textArea(window);
+	const int roomWidth = (width - 2 * DRAWER_MARGIN) / WINDOW_SCREEN_WIDTH;
+	const int roomHeight = (height - 2 * DRAWER_MARGIN - text) / WINDOW_SCREEN_HEIGHT;
+	int scale = roomWidth < roomHeight ? roomWidth : roomHeight;
 	if (scale < 1) {
 		scale = 1;
 	}
 	const int pictureWidth = WINDOW_SCREEN_WIDTH * scale;
 	const int pictureHeight = WINDOW_SCREEN_HEIGHT * scale;
 	const int left = (width - pictureWidth) / 2;
-	const int top = (height - pictureHeight) / 2;
-	const uint32_t border = 0x101014u;
+	const int top = (height - pictureHeight - text) / 2;
+	const uint32_t border = (uint32_t) pixelOf(window, DRAWER_COLOR);
 	char* data = window->image->data;
 	const int pitch = window->image->bytesPerLine;
 
@@ -781,8 +923,18 @@ void gameWindowDraw(struct GameWindow* window, const uint32_t* frame) {
 		X.Sync(window->display, 0);
 	} else {
 		X.PutImage(window->display, window->window, window->gc, window->image, 0, 0, 0, 0, (unsigned) width, (unsigned) height);
-		X.Flush(window->display);
 	}
+	if (window->hasFont) {
+		const int most = (width - 2 * DRAWER_MARGIN) / window->charWidth;
+		for (int line = 0; line < 2; line++) {
+			const int length = (int) strlen(window->lines[line]);
+			X.SetForeground(window->display, window->textGc, pixelOf(window, line == 0 ? TEXT_COLOR : DIM_TEXT_COLOR));
+			X.DrawString(window->display, window->window, window->textGc, left,
+			             top + pictureHeight + 10 + window->ascent + line * window->lineHeight, window->lines[line],
+			             length < most ? length : most);
+		}
+	}
+	X.Flush(window->display);
 }
 
 void gameWindowClose(struct GameWindow* window) {

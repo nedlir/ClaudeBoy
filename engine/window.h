@@ -1,5 +1,5 @@
-// The game window: the Game Boy's screen in a window of its own, for
-// terminals that can't show pictures. X11, loaded when first opened, so the
+// The game window: the Game Boy's screen in a drawer of its own at the right
+// edge of the desktop, for terminals that can't show pictures. X11, loaded when first opened, so the
 // engine needs no X11 to build or to run without a window; on a Wayland
 // desktop it's XWayland's.
 
@@ -31,8 +31,9 @@ struct GameWindowEvents {
 	int focus;
 };
 
-// Opens a window, unmapped, `scale` times the screen's size; NULL with the
-// reason in `error` when there's no display or no X11
+// Opens the drawer, unmapped, docked to the right edge of the desktop, the
+// game `scale` times its size (0: as large as suits the desktop); NULL with
+// the reason in `error` when there's no display or no X11
 struct GameWindow* gameWindowOpen(int scale, char* error, size_t errorSize);
 void gameWindowShow(struct GameWindow* window);
 void gameWindowHide(struct GameWindow* window);
@@ -42,6 +43,8 @@ void gameWindowPump(struct GameWindow* window, struct GameWindowEvents* events);
 // a whole multiple of its size, in the middle
 void gameWindowDraw(struct GameWindow* window, const uint32_t* frame);
 void gameWindowClose(struct GameWindow* window);
+// The drawer's width, and the width of the desktop it docks in, in pixels
+void gameWindowDrawer(struct GameWindow* window, int* width, int* workWidth);
 // Called if the display goes away, before the process has to end
 void gameWindowOnLost(void (*callback)(void));
 

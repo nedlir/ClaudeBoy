@@ -47,6 +47,7 @@ const SLOW = { timeoutMs: 30_000 }
 
 type World = {
   opens: number
+  openColumns: (number | undefined)[]
   closes: number
   spawns: (readonly string[])[]
   controls: string[]
@@ -73,6 +74,7 @@ function stubClaudeCode(
 ): World {
   const world: World = {
     opens: 0,
+    openColumns: [],
     closes: 0,
     spawns: [],
     controls: [],
@@ -87,8 +89,9 @@ function stubClaudeCode(
   on('command.register', () => ({ value: undefined }) as never)
   on('session.start', () => ({ cwd: '/work' }) as never)
   on('session.surfaces', () => ({ value: ['terminal'] }))
-  on('ui.open', () => {
+  on('ui.open', ($, e) => {
     world.opens += 1
+    world.openColumns.push(e.columns)
     return { value: isPlaced(world.opens) ? { isPlaced: true } : { isPlaced: false, reason: 'narrow' } }
   })
   on('ui.close', () => {
@@ -557,9 +560,10 @@ function titleOf(line: string): string {
   return new TextDecoder().decode(Uint8Array.from(atob(encoded), (c) => c.charCodeAt(0)))
 }
 
-const WORKING = 'Pokemon Yellow · Claude is working · S save · L load · M sound on · F speed ×2'
+const HINT = 'S save · L load · M sound on · F ×2 · Esc back'
+const WORKING = 'Pokemon Yellow · Claude is working\n' + HINT
 
-test('in a terminal without pictures, the game plays in a window of its own', SLOW, async ($, on) => {
+test('in a terminal without pictures, the game plays in a drawer, the pane making room', SLOW, async ($, on) => {
   const clock = mock.clock(on)
   const world = stubClaudeCode(on, clock, { env: { DISPLAY: ':0' } })
   await startSession($)
@@ -567,17 +571,17 @@ test('in a terminal without pictures, the game plays in a window of its own', SL
   await $.turn.start({ turnId: 't1', text: 'refactor auth' })
   await clock.advance(2000)
   await clock.settle()
-  // No pane: the window holds the game, and its title what's going on
-  expect(world.opens).toBe(0)
+  // The drawer holds the game and says what's going on; the pane only makes room
+  expect(world.opens).toBe(1)
   expect(world.control()).toMatch(/^play=1 .*view=window /)
-  expect(titleOf(world.control())).toBe('Pokemon Yellow · Click here to play · S save · L load · M sound on · F speed ×2')
+  expect(titleOf(world.control())).toBe('Pokemon Yellow · Click here to play\n' + HINT)
   world.engine.push('@focus 1')
   await clock.settle()
   expect(titleOf(world.control())).toBe(WORKING)
 
   await finishTurn($)
   await clock.advance(1000)
-  expect(titleOf(world.control())).toMatch(/^Pokemon Yellow · Claude's done · back in 2 · /)
+  expect(titleOf(world.control())).toMatch(/^Pokemon Yellow · Claude's done · back in 2\n/)
   await clock.advance(2000)
   expect(world.control()).toMatch(/^play=0 .*view=none /)
 })
@@ -597,7 +601,7 @@ test('keys typed in the window save to a slot, the title saying so', SLOW, async
   await clock.settle()
   expect(world.controls.some((line) => /cmds=\d+:save:3/.test(line))).toBe(true)
   await clock.settle()
-  expect(titleOf(world.control())).toMatch(/^Pokemon Yellow · Saved to slot 3 · /)
+  expect(titleOf(world.control())).toMatch(/^Pokemon Yellow · Saved to slot 3\n/)
 })
 
 test('closing the window pauses the game, and it stays closed for the turn', SLOW, async ($, on) => {
@@ -629,7 +633,27 @@ test('where no window can open, the game plays in the pane', SLOW, async ($, on)
   await clock.advance(2000)
   world.engine.push('@nowindow no X11 (libX11.so.6) to draw a window with')
   await clock.settle()
-  expect(world.opens).toBe(1)
+  // Once to make room for the drawer, then for the game itself
+  expect(world.opens).toBe(2)
   await $.ui.mount(GAME)
   expect(world.control()).toContain('view=cells:100x45')
+})
+
+test('the pane opens as wide as the drawer, so the transcript moves aside', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on, clock, { env: { DISPLAY: ':0' } })
+  await startSession($)
+
+  await $.turn.start({ turnId: 't1', text: 'refactor auth' })
+  await clock.advance(2000)
+  // A 120-column terminal across a desktop 1214 pixels wide, and a drawer of 512
+  world.engine.push('@term 120 32 0 0')
+  world.engine.push('@drawer 512 1214')
+  await clock.settle()
+  expect(world.openColumns.at(-1)).toBe(52)
+  // Esc in the drawer hands back
+  world.engine.push('@closed')
+  await clock.settle()
+  expect(world.control()).toMatch(/^play=0 /)
+  expect(world.closes).toBeGreaterThan(0)
 })
