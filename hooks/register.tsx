@@ -64,7 +64,7 @@ const HELP = [
   '  /claudeboy sound on|off',
   '  /claudeboy display auto|cells|image|window',
   '',
-  'In the game: S: save · L: load · O: open · G: Game Library · M: sound · F: speed ×1, ×2, ×4 · Esc: exit.',
+  'In the game: S: save · L: load · O: open · G: game library · M: sound · F: speed ×1, ×2, ×4 · Esc: exit.',
   "The Game Boy's buttons: " + CONTROLS + '.',
 ].join('\n')
 
@@ -823,7 +823,7 @@ function hintRows(): string[] {
     const slots = SLOTS.map((slot) => slot + ': ' + (slotTimes[slot] ? ago(slotTimes[slot]) : 'empty'))
     return [slots.slice(0, 3), slots.slice(3, 6), slots.slice(6, 9)].map((row) => row.join(' · '))
   }
-  return ['S: save · L: load · Esc: exit', 'O: open · G: Game Library', 'M: sound · F: ×' + wanted.speed]
+  return ['S: save · L: load · Esc: exit', 'O: open · G: game library', 'M: sound · F: ×' + wanted.speed]
 }
 
 // The engine's run folder's name, drawn in the pane under the game window:
@@ -1212,7 +1212,7 @@ async function gamesCommand($: Dollar, choice: string) {
   if (!choice) {
     if (!library.length) return { text: NO_GAME }
     const lines = library.map((kept, i) => '  ' + (i + 1) + '  ' + kept.title + (kept.rom === game?.rom ? '  (playing)' : '') + '\n     ' + kept.rom)
-    return { text: 'Game Library:\n' + lines.join('\n') + '\n\nPlay one with /claudeboy games <number>, or press G in ClaudeBoy.' }
+    return { text: 'Your game library:\n' + lines.join('\n') + '\n\nPlay one with /claudeboy games <number>, or press G in ClaudeBoy.' }
   }
   const kept = library[Number(choice) - 1]
   if (!/^\d+$/.test(choice) || !kept) return { text: 'No game number ' + choice + '. /claudeboy games lists them.' }
@@ -1481,7 +1481,7 @@ export const register: Register = (on) => {
     if (menu === 'games') {
       return (
         <Box flexDirection="column" gap={1}>
-          <Text bold>Game Library</Text>
+          <Text bold>Your game library</Text>
           <Box flexDirection="column">
             {library.map((kept, i) => (
               <Button
@@ -1510,7 +1510,7 @@ export const register: Register = (on) => {
             of its own in other terminals. You're handed back when Claude is done or needs you, and the game is saved
             each time.
           </Text>
-          <Text>In the game: S: save · L: load · O: open · G: Game Library · M: sound · F: speed · Esc: exit</Text>
+          <Text>In the game: S: save · L: load · O: open · G: game library · M: sound · F: speed · Esc: exit</Text>
           {welcomeStatus ? <Text color={welcomeStatus.startsWith('Ready') ? 'green' : undefined}>{welcomeStatus}</Text> : null}
           <Text dimColor>/claudeboy play opens it now · /claudeboy help lists the rest · /claudeboy off turns it off</Text>
           <Button

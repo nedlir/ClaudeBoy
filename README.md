@@ -14,8 +14,9 @@ you're handed back at once and dropped in again after you answer. In auto mode
 the classifier answers most prompts, so play goes on through those.
 
 Any Game Boy or Game Boy Color game works (`.gb`, `.gbc`). You open the ones
-you own, and ClaudeBoy keeps them in a Game Library to switch between, each
-with its own saves. It was built against Pokémon Yellow.
+you own, and ClaudeBoy keeps them in a game library to switch between, each
+with its own saves. Super Game Boy games play in their Super Game Boy colors.
+It was built against Pokémon Yellow.
 
 ## Setup
 
@@ -67,7 +68,7 @@ ClaudeBoy's own keys show under the game, a few to a row:
 | Save to a slot | S, then 1–9 |
 | Load a slot | L, then 1–9 |
 | Open another game | O |
-| Game Library: switch to a game you opened before | G, then 1–9 or the arrows and Enter |
+| Switch to a game from your game library | G, then 1–9 or the arrows and Enter |
 | Sound on or off | M (off at first) |
 | Speed ×1, ×2, ×4 | F |
 | Back to Claude | Esc |
@@ -105,8 +106,12 @@ Everything lives in `~/.local/share/claudeboy/saves/<game>/`: `battery.sav`,
 `auto.state` and `slot1.state` to `slot9.state`. To bring a save from another
 emulator, put its `.sav` there as `battery.sav` and delete `auto.state`, if
 there is one: an autosave carries the in-game save it was made with, and
-loading it writes that back. Set `CLAUDEBOY_DATA_DIR` to keep saves and ROMs
+loading it writes that back. Set `CLAUDEBOY_DATA_DIR` to keep saves
 somewhere else.
+
+Your game library remembers where each game's file is, and the files stay
+where they are. If you move one, open it again from its new place with O; its
+saves carry over, since they follow the game, not the file.
 
 One session at a time plays a given game. When another session has it, the
 pane asks "Would you like to play it here?": 1 or Enter on Yes, 0 or Enter on
@@ -161,9 +166,9 @@ pictures through.
 /claudeboy load <1-9>   load a slot
 /claudeboy slots        list the slots
 /claudeboy open [path]  open a game (.gb, .gbc); without a path, pick one
-/claudeboy games [n]    list the Game Library, or play game n
+/claudeboy games [n]    list your game library, or play game n
 /claudeboy sound on|off
-/claudeboy display auto|cells|image
+/claudeboy display auto|cells|image|window
 ```
 
 ## How it works
@@ -182,7 +187,7 @@ the picture and turns key presses into held buttons. Other terminals get the
 engine's own window (`engine/window.c`) with the console drawn around the
 game (`engine/console.c`). The engine loads `libX11` the first
 time the window opens and reads the buttons straight from the window. Keys
-that aren't the Game Boy's, like S, L, M and F, go up to the mod, which sends
+that aren't the Game Boy's, like S, L, O, G, M and F, go up to the mod, which sends
 back the window's title. Sound, when on, is played through `aplay`, `pacat`
 or `ffplay`.
 

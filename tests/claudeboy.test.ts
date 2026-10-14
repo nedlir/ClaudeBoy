@@ -633,7 +633,7 @@ function titleOf(line: string): string {
   return new TextDecoder().decode(Uint8Array.from(atob(encoded), (c) => c.charCodeAt(0)))
 }
 
-const HINT = 'S: save · L: load · Esc: exit\nO: open · G: Game Library\nM: sound · F: ×1'
+const HINT = 'S: save · L: load · Esc: exit\nO: open · G: game library\nM: sound · F: ×1'
 const WORKING = 'Pokemon Yellow · Claude is working\n' + HINT
 
 test('in a terminal without pictures, the game plays in a drawer, the pane making room', SLOW, async ($, on) => {
