@@ -10,7 +10,6 @@
 #define BODY 0xFFD97757u
 #define BODY_LIGHT 0xFFEDA088u
 #define BODY_SHADE 0xFFB45A40u
-#define GROOVE 0xFFBE6347u
 #define RECESS 0xFFC4664Au
 #define SLOT 0xFFA4502Fu
 #define BEZEL 0xFF2A2321u
@@ -30,13 +29,10 @@
 #define LIT_GLOW 0xFFFFE9DEu
 #define LED_ON 0xFFFF5A4Au
 #define LED_GLOW 0xFFFFA08Fu
-#define LED_OFF 0xFF5E2A20u
 
 enum { KEY_A, KEY_B, KEY_SELECT, KEY_START, KEY_RIGHT, KEY_LEFT, KEY_UP, KEY_DOWN };
 
 struct Layout {
-	int width;
-	int height;
 	int bodyRadius[4]; // top left, top right, bottom right, bottom left
 	int bezel[4];      // x, y, width, height
 	int bezelRadius[4];
@@ -53,15 +49,12 @@ struct Layout {
 	int buttonRadius;
 	int pills[3][4]; // select, start, speed: one end, the other
 	int pillLabels[3][2];
-	int groove; // y of the top groove, or -1
-	int slots;
-	int slot[6][4];
+	int slot[4][4]; // the speaker's: one end, the other
 };
 
-// The console: wide, the controls at either side of the screen
-static const struct Layout WIDE = {
-	.width = 272,
-	.height = 198,
+// Wide, the controls at either side of the screen, CONSOLE_WIDTH by
+// CONSOLE_HEIGHT
+static const struct Layout LAYOUT = {
 	.bodyRadius = { 30, 30, 30, 30 },
 	.bezel = { 48, 8, 176, 166 },
 	.bezelRadius = { 6, 6, 6, 6 },
@@ -78,25 +71,17 @@ static const struct Layout WIDE = {
 	.buttonRadius = 9,
 	.pills = { { 19, 130, 29, 124 }, { 19, 152, 29, 146 }, { 243, 152, 253, 146 } },
 	.pillLabels = { { 12, 134 }, { 14, 156 }, { 245, 156 } },
-	.groove = -1,
-	.slots = 4,
 	.slot = { { 222, 188, 229, 172 }, { 228, 188, 235, 172 }, { 234, 186, 241, 172 }, { 240, 182, 246, 172 } },
 };
 
-static const struct Layout* layoutOf(struct ConsoleShape shape) {
-	(void) shape;
-	return &WIDE;
-}
-
-int consoleFit(int width, int height, struct ConsoleShape* shape) {
-	*shape = (struct ConsoleShape) { true, WIDE.width, WIDE.height };
-	const int scale = width / WIDE.width < height / WIDE.height ? width / WIDE.width : height / WIDE.height;
+int consoleFit(int width, int height) {
+	const int scale = width / CONSOLE_WIDTH < height / CONSOLE_HEIGHT ? width / CONSOLE_WIDTH : height / CONSOLE_HEIGHT;
 	return scale < 1 ? 1 : scale;
 }
 
-void consoleScreen(struct ConsoleShape shape, int* x, int* y) {
-	*x = layoutOf(shape)->screenX;
-	*y = layoutOf(shape)->screenY;
+void consoleScreen(int* x, int* y) {
+	*x = LAYOUT.screenX;
+	*y = LAYOUT.screenY;
 }
 
 // --- Drawing ---------------------------------------------------------------
@@ -106,6 +91,10 @@ struct Canvas {
 	int width;
 	int height;
 };
+
+static uint32_t get(const struct Canvas* canvas, int x, int y) {
+	return x >= 0 && y >= 0 && x < canvas->width && y < canvas->height ? canvas->pixels[y * canvas->width + x] : 0;
+}
 
 static void put(struct Canvas* canvas, int x, int y, uint32_t color) {
 	if (x >= 0 && y >= 0 && x < canvas->width && y < canvas->height) {
@@ -176,7 +165,7 @@ static void drawButton(struct Canvas* canvas, double cx, double cy, double r, bo
 				put(canvas, x, y, color);
 			} else if (isHeld && inCircle(x, y, cx, cy, r + 2.5)) {
 				// A glow around it while held
-				put(canvas, x, y, mix(canvas->pixels[y * canvas->width + x], LIT));
+				put(canvas, x, y, mix(get(canvas, x, y), LIT));
 			}
 		}
 	}
@@ -194,7 +183,7 @@ static void drawPill(struct Canvas* canvas, const int pill[4], bool isHeld) {
 				}
 				put(canvas, x, y, color);
 			} else if (isHeld && inCapsule(x, y, pill[0] + 1, pill[1] + 1, pill[2] + 1, pill[3] + 1, r + 2)) {
-				put(canvas, x, y, mix(canvas->pixels[y * canvas->width + x], LIT));
+				put(canvas, x, y, mix(get(canvas, x, y), LIT));
 			}
 		}
 	}
@@ -253,7 +242,7 @@ static const struct {
 	{ 'A', { 2, 5, 7, 5, 5 } }, { 'B', { 6, 5, 6, 5, 6 } }, { 'C', { 3, 4, 4, 4, 3 } }, { 'D', { 6, 5, 5, 5, 6 } },
 	{ 'E', { 7, 4, 6, 4, 7 } }, { 'L', { 4, 4, 4, 4, 7 } }, { 'O', { 2, 5, 5, 5, 2 } }, { 'R', { 6, 5, 6, 5, 5 } },
 	{ 'S', { 3, 4, 2, 1, 6 } }, { 'T', { 7, 2, 2, 2, 2 } }, { 'U', { 5, 5, 5, 5, 7 } }, { 'X', { 5, 5, 2, 5, 5 } },
-	{ '1', { 2, 6, 2, 2, 7 } }, { '2', { 6, 1, 2, 4, 7 } }, { '4', { 5, 5, 7, 1, 1 } }, { '8', { 2, 5, 2, 5, 2 } },
+	{ '1', { 2, 6, 2, 2, 7 } }, { '2', { 6, 1, 2, 4, 7 } }, { '4', { 5, 5, 7, 1, 1 } },
 };
 
 static void drawSmall(struct Canvas* canvas, int x, int y, const char* text, uint32_t color) {
@@ -326,15 +315,14 @@ static void drawSpark(struct Canvas* canvas, int cx, int cy, uint32_t color) {
 	}
 }
 
-void consoleDraw(struct ConsoleShape shape, const uint32_t* screen, uint32_t keys, bool isSpeedHeld, int speed,
-                 bool isOn, uint32_t* out) {
-	const struct Layout* layout = layoutOf(shape);
-	struct Canvas canvas = { out, layout->width, layout->height };
-	const int body[4] = { 0, 0, layout->width, layout->height };
+void consoleDraw(const uint32_t* screen, uint32_t keys, bool isSpeedHeld, int speed, uint32_t* out) {
+	const struct Layout* layout = &LAYOUT;
+	struct Canvas canvas = { out, CONSOLE_WIDTH, CONSOLE_HEIGHT };
+	const int body[4] = { 0, 0, CONSOLE_WIDTH, CONSOLE_HEIGHT };
 
 	// The body, bevelled: lit along its top and left, shaded along the rest
-	for (int y = 0; y < layout->height; y++) {
-		for (int x = 0; x < layout->width; x++) {
+	for (int y = 0; y < CONSOLE_HEIGHT; y++) {
+		for (int x = 0; x < CONSOLE_WIDTH; x++) {
 			uint32_t color = 0;
 			if (inRoundRect(x, y, body, layout->bodyRadius)) {
 				color = BODY;
@@ -344,13 +332,7 @@ void consoleDraw(struct ConsoleShape shape, const uint32_t* screen, uint32_t key
 					color = BODY_SHADE;
 				}
 			}
-			out[y * layout->width + x] = color;
-		}
-	}
-	if (layout->groove >= 0) {
-		for (int x = 8; x < layout->width - 8; x++) {
-			put(&canvas, x, layout->groove, GROOVE);
-			put(&canvas, x, layout->groove + 1, BODY_LIGHT);
+			out[y * CONSOLE_WIDTH + x] = color;
 		}
 	}
 
@@ -383,10 +365,10 @@ void consoleDraw(struct ConsoleShape shape, const uint32_t* screen, uint32_t key
 
 	// The screen, edged in shadow
 	for (int y = 0; y < CONSOLE_SCREEN_HEIGHT; y++) {
-		memcpy(&out[(layout->screenY + y) * layout->width + layout->screenX], &screen[y * CONSOLE_SCREEN_WIDTH],
+		memcpy(&out[(layout->screenY + y) * CONSOLE_WIDTH + layout->screenX], &screen[y * CONSOLE_SCREEN_WIDTH],
 		       CONSOLE_SCREEN_WIDTH * sizeof(uint32_t));
 		for (int x = 0; x < CONSOLE_SCREEN_WIDTH; x++) {
-			out[(layout->screenY + y) * layout->width + layout->screenX + x] |= 0xFF000000u;
+			out[(layout->screenY + y) * CONSOLE_WIDTH + layout->screenX + x] |= 0xFF000000u;
 		}
 	}
 	for (int x = -1; x <= CONSOLE_SCREEN_WIDTH; x++) {
@@ -400,9 +382,9 @@ void consoleDraw(struct ConsoleShape shape, const uint32_t* screen, uint32_t key
 	for (int y = layout->led[1] - 5; y <= layout->led[1] + 5; y++) {
 		for (int x = layout->led[0] - 5; x <= layout->led[0] + 5; x++) {
 			if (inCircle(x, y, layout->led[0], layout->led[1], 3)) {
-				put(&canvas, x, y, isOn ? (inCircle(x, y, layout->led[0] - 1, layout->led[1] - 1, 1.2) ? LED_GLOW : LED_ON) : LED_OFF);
-			} else if (isOn && inCircle(x, y, layout->led[0], layout->led[1], 5)) {
-				put(&canvas, x, y, mix(out[y * layout->width + x], LED_ON));
+				put(&canvas, x, y, inCircle(x, y, layout->led[0] - 1, layout->led[1] - 1, 1.2) ? LED_GLOW : LED_ON);
+			} else if (inCircle(x, y, layout->led[0], layout->led[1], 5)) {
+				put(&canvas, x, y, mix(get(&canvas, x, y), LED_ON));
 			}
 		}
 	}
@@ -435,7 +417,7 @@ void consoleDraw(struct ConsoleShape shape, const uint32_t* screen, uint32_t key
 	drawSmall(&canvas, layout->pillLabels[2][0], layout->pillLabels[2][1], speedLabel, INK);
 
 	// The speaker's slots, where they fall on the body
-	for (int i = 0; i < layout->slots; i++) {
+	for (int i = 0; i < 4; i++) {
 		const int* slot = layout->slot[i];
 		for (int y = slot[3] - 3; y <= slot[1] + 3; y++) {
 			for (int x = slot[0] - 3; x <= slot[2] + 3; x++) {
@@ -448,8 +430,8 @@ void consoleDraw(struct ConsoleShape shape, const uint32_t* screen, uint32_t key
 	}
 }
 
-int consoleButtonAt(struct ConsoleShape shape, double x, double y) {
-	const struct Layout* layout = layoutOf(shape);
+int consoleButtonAt(double x, double y) {
+	const struct Layout* layout = &LAYOUT;
 	const double dx = x - layout->pad[0];
 	const double dy = y - layout->pad[1];
 	// The cross, a little generous, by its strongest direction

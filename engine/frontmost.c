@@ -61,7 +61,8 @@ static int ancestors[64];
 static int ancestorCount;
 static atomic_bool isShowNoted = false;
 static atomic_bool isNoteAnswered = true;
-static atomic_bool isWatching = false;
+// libatspi couldn't be loaded, or the bus reached: nothing will be answered
+static atomic_bool hasFailed = false;
 static char marker[128];
 
 static void sleepMs(int ms) {
@@ -204,7 +205,7 @@ static AtspiAccessible* findTerminal(AtspiAccessible* node, int depth) {
 	if (role == ROLE_TERMINAL) {
 		return showsMarker(node) ? node : NULL;
 	}
-	if (isMenu(role)) {
+	if (role < 0 || isMenu(role)) {
 		return NULL;
 	}
 	GError* error = NULL;
@@ -215,6 +216,7 @@ static AtspiAccessible* findTerminal(AtspiAccessible* node, int depth) {
 	for (int i = 0; i < count && i < 64; i++) {
 		AtspiAccessible* child = A.childAt(node, i, &error);
 		if (failed(error) || !child) {
+			error = NULL;
 			continue;
 		}
 		AtspiAccessible* found = findTerminal(child, depth + 1);
@@ -374,6 +376,8 @@ static void letGo(AtspiAccessible** node) {
 static void* watch(void* unused) {
 	(void) unused;
 	if (!load()) {
+		atomic_store(&hasFailed, true);
+		atomic_store(&isNoteAnswered, true);
 		return NULL;
 	}
 	readAncestors();
@@ -384,7 +388,6 @@ static void* watch(void* unused) {
 	AtspiAccessible* frame = NULL;
 	AtspiAccessible* tab = NULL;
 	bool isMarked = false;
-	atomic_store(&isWatching, true);
 	for (int round = 0;; round++) {
 		// Messages from the bus the calls didn't take, handled so they don't pile up
 		for (int i = 0; i < 64 && A.iterate(NULL, 0); i++) {
@@ -401,7 +404,7 @@ static void* watch(void* unused) {
 		// and then), and checked now and then, in case the pane moved to
 		// another terminal. A terminal once found is kept while the marker
 		// shows nowhere else.
-		if (isMarked ? round % 60 == 0 && !showsMarker(terminal) : round % 60 == 0) {
+		if (round % 60 == 0 && !(isMarked && showsMarker(terminal))) {
 			AtspiAccessible* marked = findOurs(round % 300 == 0);
 			if (marked) {
 				letGo(&terminal);
@@ -449,7 +452,7 @@ void frontmostStart(const char* text) {
 }
 
 void frontmostNoteShown(void) {
-	if (!atomic_load(&isWatching)) {
+	if (atomic_load(&hasFailed)) {
 		return;
 	}
 	atomic_store(&isNoteAnswered, false);

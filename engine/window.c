@@ -217,9 +217,6 @@ enum {
 #define PSize (1L << 3)
 #define PMinSize (1L << 4)
 #define PMaxSize (1L << 5)
-#define PResizeInc (1L << 6)
-#define PAspect (1L << 7)
-#define PBaseSize (1L << 8)
 #define SHAPE_BOUNDING 0
 #define SHAPE_SET 0
 
@@ -247,7 +244,6 @@ static struct {
 	int (*SelectInput)(Display*, Window, long);
 	int (*MapRaised)(Display*, Window);
 	int (*UnmapWindow)(Display*, Window);
-	int (*MoveWindow)(Display*, Window, int, int);
 	int (*MoveResizeWindow)(Display*, Window, int, int, unsigned, unsigned);
 	int (*StoreName)(Display*, Window, const char*);
 	Atom (*InternAtom)(Display*, const char*, Bool);
@@ -315,7 +311,6 @@ static bool loadX11(char* error, size_t errorSize) {
 		FROM(x11, SelectInput, true),
 		FROM(x11, MapRaised, true),
 		FROM(x11, UnmapWindow, true),
-		FROM(x11, MoveWindow, true),
 		FROM(x11, MoveResizeWindow, true),
 		FROM(x11, StoreName, true),
 		FROM(x11, InternAtom, true),
@@ -368,17 +363,11 @@ struct GameWindow {
 	Atom deleteWindow;
 	Atom activeWindow;
 	Atom wmState;
-	Atom wmStateAbove;
 	Atom wmName;
 	Atom utf8String;
-	Atom wmIcon;
-	Atom wmPid;
 
 	int width;
 	int height;
-	int x;
-	int y;
-	bool hasPosition;
 	bool isShown;
 	bool needsDrawing;
 
@@ -394,7 +383,8 @@ struct GameWindow {
 	int blueShift;
 
 	// Where the drawer docks, the width of the desktop it docks in, and the
-	// two lines of status it shows under the game, in Latin-1 for X's fonts
+	// lines it shows under the game (the status, then up to three rows of
+	// hints), in Latin-1 for X's fonts
 	int dockX;
 	int dockY;
 	int dockWidth;
@@ -430,14 +420,13 @@ struct GameWindow {
 	// The console around the game, drawn at its own size, then `scale` times
 	// that at `consoleX`, `consoleY`; `drawn` is what it was drawn with, to
 	// draw again only when a button changes
-	struct ConsoleShape shape;
 	int scale;
 	int consoleX;
 	int consoleY;
-	uint32_t art[CONSOLE_MAX_WIDTH * CONSOLE_MAX_HEIGHT];
+	uint32_t art[CONSOLE_WIDTH * CONSOLE_HEIGHT];
 	uint32_t drawn;
-	// The window cut to the console's outline, at this size; 0, not cut
-	int cutWidth;
+	// The window cut to the console's outline, and at what scale
+	bool isCut;
 	int cutScale;
 	// Buttons held with the mouse, the speed button among them, and the speed
 	uint32_t mouseKeys;
@@ -592,12 +581,20 @@ static void setTitle(struct GameWindow* window, const char* utf8) {
 	X.StoreName(window->display, window->window, name);
 	char joined[512];
 	size_t out = 0;
-	for (const char* c = utf8; *c && out < sizeof(joined) - 4; c++) {
+	const char* c = utf8;
+	for (; *c && out < sizeof(joined) - 4; c++) {
 		if (*c == '\n') {
 			memcpy(joined + out, " \xC2\xB7 ", 4);
 			out += 4;
 		} else {
 			joined[out++] = *c;
+		}
+	}
+	// Cut short: not in the middle of a character
+	if (*c) {
+		while (out > 0 && ((unsigned char) *c & 0xC0) == 0x80) {
+			out--;
+			c--;
 		}
 	}
 	joined[out] = '\0';
@@ -608,7 +605,7 @@ static void setTitle(struct GameWindow* window, const char* utf8) {
 
 // The drawer's size, as tall as the work area and wide enough for the game
 // at a whole multiple of its size, and where it docks: the right edge
-static void dock(struct GameWindow* window, int scale) {
+static void dock(struct GameWindow* window) {
 	long area[4] = { 0, 0, X.DisplayWidth(window->display, window->screen), X.DisplayHeight(window->display, window->screen) };
 	Atom type = 0;
 	int format = 0;
@@ -627,13 +624,10 @@ static void dock(struct GameWindow* window, int scale) {
 	const int areaHeight = (int) area[3];
 	// The console as large as fits the desktop's height, at a whole multiple
 	// of its size, and never more than half its width
-	struct ConsoleShape shape;
-	const int fits =
-		consoleFit(areaWidth / 2 - 2 * DRAWER_MARGIN, areaHeight - 2 * DRAWER_MARGIN - textArea(window), &shape);
-	scale = scale < 1 || scale > fits ? fits : scale;
-	scale = scale > 8 ? 8 : scale;
-	window->width = shape.width * scale + 2 * DRAWER_MARGIN;
-	window->height = areaHeight > 0 ? areaHeight : shape.height * scale + 2 * DRAWER_MARGIN + textArea(window);
+	const int fits = consoleFit(areaWidth / 2 - 2 * DRAWER_MARGIN, areaHeight - 2 * DRAWER_MARGIN - textArea(window));
+	const int scale = fits > 8 ? 8 : fits;
+	window->width = CONSOLE_WIDTH * scale + 2 * DRAWER_MARGIN;
+	window->height = areaHeight > 0 ? areaHeight : CONSOLE_HEIGHT * scale + 2 * DRAWER_MARGIN + textArea(window);
 	window->dockX = (int) area[0] + areaWidth - window->width;
 	window->dockY = (int) area[1];
 	window->dockWidth = window->width;
@@ -668,10 +662,9 @@ void gameWindowPlace(struct GameWindow* window, int boxX, int boxY, int boxWidth
 	int width = 0;
 	int height = 0;
 	if (isOverlay) {
-		struct ConsoleShape shape;
-		const int scale = consoleFit(boxWidth, boxHeight, &shape);
-		width = shape.width * scale;
-		height = shape.height * scale;
+		const int scale = consoleFit(boxWidth, boxHeight);
+		width = CONSOLE_WIDTH * scale;
+		height = CONSOLE_HEIGHT * scale;
 		x = boxX + (boxWidth - width) / 2;
 		y = boxY + (boxHeight - height) / 2;
 	}
@@ -706,6 +699,7 @@ static void loadFont(struct GameWindow* window) {
 		int charWidth;
 	} FONTS[] = { { "9x15", 18, 12, 9 }, { "fixed", 15, 10, 6 } };
 	for (size_t i = 0; i < sizeof(FONTS) / sizeof(FONTS[0]); i++) {
+		X.Sync(window->display, 0);
 		hasXError = false;
 		const XID font = X.LoadFont(window->display, FONTS[i].name);
 		X.Sync(window->display, 0);
@@ -722,11 +716,11 @@ static void loadFont(struct GameWindow* window) {
 }
 
 void gameWindowDrawer(struct GameWindow* window, int* width, int* workWidth) {
-	*width = window->width;
+	*width = window->dockWidth;
 	*workWidth = window->workWidth;
 }
 
-struct GameWindow* gameWindowOpen(int scale, char* error, size_t errorSize) {
+struct GameWindow* gameWindowOpen(char* error, size_t errorSize) {
 	if (!getenv("DISPLAY")) {
 		snprintf(error, errorSize, "no desktop to open a window on (DISPLAY is unset)");
 		return NULL;
@@ -743,6 +737,11 @@ struct GameWindow* gameWindowOpen(int scale, char* error, size_t errorSize) {
 	}
 
 	struct GameWindow* window = calloc(1, sizeof(*window));
+	if (!window) {
+		snprintf(error, errorSize, "out of memory");
+		X.CloseDisplay(display);
+		return NULL;
+	}
 	window->display = display;
 	window->screen = X.DefaultScreen(display);
 	window->root = X.RootWindow(display, window->screen);
@@ -761,11 +760,11 @@ struct GameWindow* gameWindowOpen(int scale, char* error, size_t errorSize) {
 		return NULL;
 	}
 
-	// The font's height sets aside room for the status: sized with a stand-in
-	// window, measured again once the real one exists
+	// The drawer sets aside room for its lines in 9x15, the font it asks for
+	// first, before there's a window to load a font for
 	window->hasFont = true;
 	window->lineHeight = 18;
-	dock(window, scale);
+	dock(window);
 	window->hasFont = false;
 	window->window = X.CreateSimpleWindow(display, window->root, window->dockX, window->dockY, (unsigned) window->width,
 	                                      (unsigned) window->height, 0, 0, pixelOf(window, DRAWER_COLOR));
@@ -778,11 +777,8 @@ struct GameWindow* gameWindowOpen(int scale, char* error, size_t errorSize) {
 	X.SetWMProtocols(display, window->window, &window->deleteWindow, 1);
 	window->activeWindow = X.InternAtom(display, "_NET_ACTIVE_WINDOW", 0);
 	window->wmState = X.InternAtom(display, "_NET_WM_STATE", 0);
-	window->wmStateAbove = X.InternAtom(display, "_NET_WM_STATE_ABOVE", 0);
 	window->wmName = X.InternAtom(display, "_NET_WM_NAME", 0);
 	window->utf8String = X.InternAtom(display, "UTF8_STRING", 0);
-	window->wmIcon = X.InternAtom(display, "_NET_WM_ICON", 0);
-	window->wmPid = X.InternAtom(display, "_NET_WM_PID", 0);
 	window->opacity = X.InternAtom(display, "_NET_WM_WINDOW_OPACITY", 0);
 
 	// A drawer: docked where it's told, its own size, with no title bar,
@@ -791,17 +787,17 @@ struct GameWindow* gameWindowOpen(int scale, char* error, size_t errorSize) {
 	const Atom motif = X.InternAtom(display, "_MOTIF_WM_HINTS", 0);
 	const unsigned long noDecorations[5] = { 2, 0, 0, 0, 0 };
 	X.ChangeProperty(display, window->window, motif, motif, 32, PropModeReplace, (const unsigned char*) noDecorations, 5);
-	window->wmStates[0] = window->wmStateAbove;
+	window->wmStates[0] = X.InternAtom(display, "_NET_WM_STATE_ABOVE", 0);
 	window->wmStates[1] = X.InternAtom(display, "_NET_WM_STATE_SKIP_TASKBAR", 0);
 	window->wmStates[2] = X.InternAtom(display, "_NET_WM_STATE_SKIP_PAGER", 0);
 	XClassHint classHint = { "claudeboy", "ClaudeBoy" };
 	X.SetClassHint(display, window->window, &classHint);
 	unsigned long pid = (unsigned long) getpid();
-	X.ChangeProperty(display, window->window, window->wmPid, XA_CARDINAL, 32, PropModeReplace, (const unsigned char*) &pid, 1);
+	X.ChangeProperty(display, window->window, X.InternAtom(display, "_NET_WM_PID", 0), XA_CARDINAL, 32, PropModeReplace, (const unsigned char*) &pid, 1);
 	static unsigned long icon[2 + 32 * 32];
 	icon[0] = icon[1] = 32;
 	drawIcon(icon + 2, 32);
-	X.ChangeProperty(display, window->window, window->wmIcon, XA_CARDINAL, 32, PropModeReplace, (const unsigned char*) icon,
+	X.ChangeProperty(display, window->window, X.InternAtom(display, "_NET_WM_ICON", 0), XA_CARDINAL, 32, PropModeReplace, (const unsigned char*) icon,
 	                 2 + 32 * 32);
 	setTitle(window, "ClaudeBoy");
 	if (X.SetDetectableAutoRepeat) {
@@ -996,7 +992,7 @@ void gameWindowPump(struct GameWindow* window, struct GameWindowEvents* events) 
 				window->needsDrawing = true;
 				break;
 			}
-			const int button = consoleButtonAt(window->shape, (double) (event.xbutton.x - window->consoleX) / window->scale,
+			const int button = consoleButtonAt((double) (event.xbutton.x - window->consoleX) / window->scale,
 			                                   (double) (event.xbutton.y - window->consoleY) / window->scale);
 			if (button == CONSOLE_SPEED) {
 				window->isSpeedHeld = true;
@@ -1025,12 +1021,6 @@ void gameWindowPump(struct GameWindow* window, struct GameWindowEvents* events) 
 				window->width = event.xconfigure.width;
 				window->height = event.xconfigure.height;
 				window->needsDrawing = true;
-			}
-			// The window manager's own says where the window is on the screen
-			if (event.xconfigure.sendEvent) {
-				window->x = event.xconfigure.x;
-				window->y = event.xconfigure.y;
-				window->hasPosition = true;
 			}
 			break;
 		case Expose:
@@ -1085,6 +1075,7 @@ static bool fitImage(struct GameWindow* window) {
 			if (window->shm.shmid >= 0) {
 				window->shm.shmaddr = image->data = shmat(window->shm.shmid, NULL, 0);
 				window->shm.readOnly = 0;
+				X.Sync(window->display, 0);
 				hasXError = false;
 				const bool isAttached = window->shm.shmaddr != (char*) -1 && X.ShmAttach(window->display, &window->shm);
 				X.Sync(window->display, 0);
@@ -1130,26 +1121,25 @@ static bool fitImage(struct GameWindow* window) {
 // terminal, so the terminal shows around its rounded corners; uncut as the
 // drawer
 static void cut(struct GameWindow* window) {
-	const int width = window->isOverlay ? window->shape.width : 0;
-	if (!X.ShapeCombineMask || (width == window->cutWidth && window->scale == window->cutScale)) {
+	if (!X.ShapeCombineMask || (window->isOverlay == window->isCut && window->scale == window->cutScale)) {
 		return;
 	}
-	window->cutWidth = width;
+	window->isCut = window->isOverlay;
 	window->cutScale = window->scale;
-	if (!width) {
+	if (!window->isCut) {
 		X.ShapeCombineMask(window->display, window->window, SHAPE_BOUNDING, 0, 0, 0, SHAPE_SET);
 		return;
 	}
 	const int scale = window->scale;
-	const int maskWidth = window->shape.width * scale;
-	const int maskHeight = window->shape.height * scale;
+	const int maskWidth = CONSOLE_WIDTH * scale;
+	const int maskHeight = CONSOLE_HEIGHT * scale;
 	const int pitch = (maskWidth + 7) / 8;
 	char* bits = calloc((size_t) pitch * maskHeight, 1);
 	if (!bits) {
 		return;
 	}
 	for (int y = 0; y < maskHeight; y++) {
-		const uint32_t* source = &window->art[(y / scale) * window->shape.width];
+		const uint32_t* source = &window->art[(y / scale) * CONSOLE_WIDTH];
 		for (int x = 0; x < maskWidth; x++) {
 			if (source[x / scale] >> 24) {
 				bits[y * pitch + x / 8] |= (char) (1 << (x % 8));
@@ -1172,10 +1162,9 @@ void gameWindowDraw(struct GameWindow* window, const uint32_t* frame) {
 	// drawer; laid over its box, the window is the console's own size
 	const int text = textArea(window);
 	const int margin = window->isOverlay ? 0 : DRAWER_MARGIN;
-	struct ConsoleShape shape;
-	const int scale = consoleFit(width - 2 * margin, height - 2 * margin - text, &shape);
-	const int consoleWidth = shape.width * scale;
-	const int consoleHeight = shape.height * scale;
+	const int scale = consoleFit(width - 2 * margin, height - 2 * margin - text);
+	const int consoleWidth = CONSOLE_WIDTH * scale;
+	const int consoleHeight = CONSOLE_HEIGHT * scale;
 	// The drawer's console slides in a little as it fades in
 	int slide = 0;
 	if (window->fade > 0 && !window->isOverlay) {
@@ -1186,27 +1175,26 @@ void gameWindowDraw(struct GameWindow* window, const uint32_t* frame) {
 	const int left = (width - consoleWidth) / 2 + slide;
 	const int top = (height - consoleHeight - text) / 2;
 
-	// The console drawn again when its shape or a button changes; else only
+	// The console drawn again when a button or the speed changes; else only
 	// the screen in it
 	const uint32_t keys = window->keys | window->mouseKeys;
-	const uint32_t drawn = keys | (uint32_t) shape.isWide << 8 | (uint32_t) window->isSpeedHeld << 9 |
+	const uint32_t drawn = keys | (uint32_t) window->isSpeedHeld << 9 |
 	                       (uint32_t) window->speed << 10 | 1u << 31;
-	if (drawn != window->drawn || shape.isWide != window->shape.isWide) {
-		consoleDraw(shape, frame, keys, window->isSpeedHeld, window->speed, true, window->art);
+	if (drawn != window->drawn) {
+		consoleDraw(frame, keys, window->isSpeedHeld, window->speed, window->art);
 		window->drawn = drawn;
 	} else {
 		int screenX;
 		int screenY;
-		consoleScreen(shape, &screenX, &screenY);
-		for (int y = 0; y < WINDOW_SCREEN_HEIGHT; y++) {
-			uint32_t* row = &window->art[(screenY + y) * shape.width + screenX];
-			const uint32_t* source = &frame[y * WINDOW_SCREEN_WIDTH];
-			for (int x = 0; x < WINDOW_SCREEN_WIDTH; x++) {
+		consoleScreen(&screenX, &screenY);
+		for (int y = 0; y < CONSOLE_SCREEN_HEIGHT; y++) {
+			uint32_t* row = &window->art[(screenY + y) * CONSOLE_WIDTH + screenX];
+			const uint32_t* source = &frame[y * CONSOLE_SCREEN_WIDTH];
+			for (int x = 0; x < CONSOLE_SCREEN_WIDTH; x++) {
 				row[x] = source[x] | 0xFF000000u;
 			}
 		}
 	}
-	window->shape = shape;
 	window->scale = scale;
 	window->consoleX = left;
 	window->consoleY = top;
@@ -1229,13 +1217,11 @@ void gameWindowDraw(struct GameWindow* window, const uint32_t* frame) {
 			memcpy(row, data + (size_t) (y - 1) * pitch, (size_t) width * 4);
 			continue;
 		}
-		const uint32_t* source = &window->art[(consoleY / scale) * shape.width];
+		const uint32_t* source = &window->art[(consoleY / scale) * CONSOLE_WIDTH];
 		for (int x = 0; x < width; x++) {
 			const int consoleX = x - left;
 			const uint32_t argb = consoleX < 0 || consoleX >= consoleWidth ? 0 : source[consoleX / scale];
-			row[x] = !(argb >> 24) ? border
-			                       : ((argb >> 16) & 0xFF) << window->redShift | ((argb >> 8) & 0xFF) << window->greenShift |
-			                             (argb & 0xFF) << window->blueShift;
+			row[x] = !(argb >> 24) ? border : (uint32_t) pixelOf(window, argb);
 		}
 	}
 

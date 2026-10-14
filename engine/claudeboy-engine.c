@@ -1,6 +1,7 @@
-// ClaudeBoy's engine: one Game Boy game on mGBA's core, run without a window
-// for the ClaudeBoy Claude Code mod, which draws what this writes and hands it
-// keys and commands. How the two talk is in USAGE below.
+// ClaudeBoy's engine: one Game Boy game on mGBA's core, for the ClaudeBoy
+// Claude Code mod, which draws what this writes (or has it draw the game in a
+// window of its own) and hands it keys and commands. How the two talk is in
+// USAGE below.
 
 #define _GNU_SOURCE
 
@@ -9,7 +10,6 @@
 #include <mgba/core/core.h>
 #include <mgba/core/log.h>
 #include <mgba/core/serialize.h>
-#include <mgba/internal/gb/gb.h>
 #include <mgba/internal/gb/overrides.h>
 #include <mgba-util/vfs.h>
 
@@ -32,7 +32,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <termios.h>
+#include <sys/sysmacros.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -48,13 +48,18 @@ static const char USAGE[] =
 	"      (slot1.state to slot9.state). Every frame it reads <run-dir>/control,\n"
 	"      one line the mod rewrites in place, such as\n"
 	"        play=1 keys=17 taps=3,0,0,0,0,0,0,0 view=cells:160x72 fps=30\n"
-	"        sound=1 speed=1 cmds=7:save:2,8:load:auto\n"
-	"      (view=image:<w>x<h> asks for pictures that size in pixels instead,\n"
-	"      view=window for a window of its own, titled by title=<base64>, laid\n"
-	"      over the terminal's cells overlay=<col>,<row>,<cols>,<rows> where the\n"
-	"      terminal fills the desktop, so it looks part of it)\n"
-	"      and writes one line on stdout per event:\n"
-	"        @ready <save-key> <color 0|1> <title>\n"
+	"        sound=1 speed=1 countdown=3 cmds=7:save:2,8:load:auto\n"
+	"      keys= the buttons held, a bit each (a b select start right left up\n"
+	"      down); taps= a running count of presses per button, each held a few\n"
+	"      frames; speed= 1 to 4; countdown= seconds left, drawn over the game.\n"
+	"      view=image:<w>x<h> asks for pictures that size in pixels instead\n"
+	"      (smaller past 800,000 pixels), view=window for a window of its own,\n"
+	"      titled by title=<base64>, laid over the terminal's cells\n"
+	"      overlay=<col>,<row>,<cols>,<rows> where the terminal fills the\n"
+	"      desktop. Commands: save:<slot>, load:<slot> (1-9 or auto), takeover\n"
+	"      (take the game from the session playing it), quit.\n"
+	"      It writes one line on stdout per event:\n"
+	"        @ready <save-key> <color 0|1> <title>  (informational)\n"
 	"        @term <cols> <rows> <x-pixels> <y-pixels>  the terminal's size\n"
 	"        @cells <seq> <cols> <rows>      <run-dir>/cells holds a new frame\n"
 	"        @frame <shm-name> <w> <h>       a new RGBA frame in shared memory\n"
@@ -69,11 +74,12 @@ static const char USAGE[] =
 	"        @key <letter or digit>          typed in the game's window\n"
 	"        @closed                         the person closed the window (Esc)\n"
 	"        @drawer <width> <desktop-width> the window's width, in pixels\n"
-	"        @cell <width> <height>          a terminal cell, in pixels, when told\n"
+	"        @cell <width> <height>          a terminal cell, in pixels, where its\n"
+	"                                        grid can be found on the screen\n"
 	"        @focus 1|0                      the window got or lost the keys\n"
 	"        @nowindow <words>               no window can open here\n"
 	"        @log <words>, @error <words>\n"
-	"        @bye                            saved, and gone\n"
+	"        @bye                            saved, and gone (informational)\n"
 	"\n"
 	"  claudeboy-engine script <rom> <saves-dir> <out-dir> <step>...\n"
 	"      Runs steps as fast as it can, for testing: <n> runs n frames;\n"
@@ -82,12 +88,15 @@ static const char USAGE[] =
 	"      cells:<cols>x<rows>:<name> writes <out-dir>/<name>.cells as the mod\n"
 	"      would get them; image:<w>x<h>:<name> writes the picture frame as\n"
 	"      <out-dir>/<name>.ppm, its see-through edge magenta; save:<slot> and\n"
-	"      load:<slot>; bench:<n> times n frames.\n";
+	"      load:<slot>; bench:<n> times n frames. It takes no lock: give it a\n"
+	"      <saves-dir> of its own.\n";
 
 #define WIDTH 160
 #define HEIGHT 144
 // Pixels per row of the core's video buffer, with room for a Super Game Boy border
 #define STRIDE 256
+// The core's frame is at most a Super Game Boy's, borders and all: 256 by 224
+#define VIDEO_HEIGHT 224
 #define BUTTONS 8
 
 #define SAMPLE_RATE 48000
@@ -126,6 +135,7 @@ static const int64_t FRAME_NS = 16742706;
 static const char* const BUTTON_NAMES[BUTTONS] = { "a", "b", "select", "start", "right", "left", "up", "down" };
 
 // Players tried in order for the sound, raw 16-bit stereo on their stdin
+// Players tried in turn; their rate is SAMPLE_RATE's
 static const char* const AUDIO_PLAYERS[][16] = {
 	{ "aplay", "-q", "-t", "raw", "-f", "S16_LE", "-c", "2", "-r", "48000", "-B", "100000", "-", NULL },
 	{ "pacat", "--raw", "--format=s16le", "--rate=48000", "--channels=2", "--latency-msec=100", NULL },
@@ -136,7 +146,7 @@ enum ViewKind {
 	VIEW_NONE,
 	// Half-block cells for the mod's Raster: two pixels a cell, any terminal
 	VIEW_CELLS,
-	// Raw RGB in shared memory for the mod's Image: terminals with pictures
+	// RGBA in shared memory for the mod's Image: terminals with pictures
 	VIEW_IMAGE,
 	// A window of its own, for terminals without pictures
 	VIEW_WINDOW,
@@ -173,7 +183,6 @@ struct RomInfo {
 	char title[17];
 	char key[64];
 	bool isColor;
-	uint32_t crc32;
 };
 
 struct Engine {
@@ -199,8 +208,7 @@ struct Engine {
 
 	// The lock on the game's saves: held while this engine plays or changes
 	// them, so sessions take turns, never write over each other, and each
-	// picks up where the last left off. Also the autosave as this engine last
-	// wrote or read it, to tell when another session has played since.
+	// picks up where the last left off.
 	int lock;
 	bool hasLock;
 	bool isBusyReported;
@@ -215,6 +223,8 @@ struct Engine {
 	bool isTakingOver;
 	int64_t takeoverSinceNs;
 	bool isHolderStopped;
+	// The autosave as this engine last wrote or read it, to tell when another
+	// session has played since
 	struct stat autosave;
 	bool hasAutosave;
 
@@ -260,6 +270,8 @@ struct Engine {
 
 	int audioFd;
 	bool isAudioBroken;
+	// Which of AUDIO_PLAYERS plays, or is tried next
+	size_t audioPlayer;
 	int16_t audio[AUDIO_SAMPLES * 2];
 };
 
@@ -394,7 +406,7 @@ static bool readRomInfo(const char* path, struct RomInfo* info, char* error, siz
 	}
 	info->title[length] = '\0';
 
-	info->crc32 = crc32Of(data, size);
+	const uint32_t crc32 = crc32Of(data, size);
 	free(data);
 
 	char slug[32];
@@ -413,7 +425,7 @@ static bool readRomInfo(const char* path, struct RomInfo* info, char* error, siz
 		}
 	}
 	slug[slugLength] = '\0';
-	snprintf(info->key, sizeof(info->key), "%s-%08x", slugLength ? slug : "game", info->crc32);
+	snprintf(info->key, sizeof(info->key), "%s-%08x", slugLength ? slug : "game", crc32);
 	return true;
 }
 
@@ -451,13 +463,17 @@ static bool openGame(struct Engine* engine, const char* romPath, char* error, si
 	if (!readRomInfo(romPath, &engine->rom, error, errorSize)) {
 		return false;
 	}
-	struct VFile* rom = VFileOpen(romPath, O_RDONLY);
+	// Not passed on to the sound player
+	struct VFile* rom = VFileOpen(romPath, O_RDONLY | O_CLOEXEC);
 	if (!rom) {
 		snprintf(error, errorSize, "can't open the ROM");
 		return false;
 	}
 	struct mCore* core = mCoreFindVF(rom);
 	if (!core || core->platform(core) != mPLATFORM_GB) {
+		if (core) {
+			core->deinit(core);
+		}
 		rom->close(rom);
 		snprintf(error, errorSize, "that isn't a Game Boy ROM");
 		return false;
@@ -482,7 +498,13 @@ static bool openGame(struct Engine* engine, const char* romPath, char* error, si
 	mCoreConfigSetDefaultIntValue(&core->config, "sgb.borders", 0);
 	mCoreLoadForeignConfig(core, &core->config);
 
-	engine->video = calloc(STRIDE * 224, sizeof(color_t));
+	engine->video = calloc(STRIDE * VIDEO_HEIGHT, sizeof(color_t));
+	if (!engine->video) {
+		snprintf(error, errorSize, "out of memory");
+		core->deinit(core);
+		rom->close(rom);
+		return false;
+	}
 	core->setVideoBuffer(core, engine->video, STRIDE);
 	core->setAudioBufferSize(core, AUDIO_SAMPLES);
 	blip_set_rates(core->getAudioChannel(core, 0), core->frequency(core), SAMPLE_RATE);
@@ -490,14 +512,18 @@ static bool openGame(struct Engine* engine, const char* romPath, char* error, si
 
 	if (!core->loadROM(core, rom)) {
 		snprintf(error, errorSize, "the ROM didn't load");
+		// The core has the ROM's file now, and closes it
+		core->deinit(core);
 		return false;
 	}
 
 	char path[PATH_MAX];
 	snprintf(path, sizeof(path), "%s/battery.sav", engine->saves);
-	struct VFile* battery = VFileOpen(path, O_CREAT | O_RDWR);
+	struct VFile* battery = VFileOpen(path, O_CREAT | O_RDWR | O_CLOEXEC);
 	if (!battery) {
 		snprintf(error, errorSize, "can't open the battery save %s: %s", path, strerror(errno));
+		core->unloadROM(core);
+		core->deinit(core);
 		return false;
 	}
 	core->loadSave(core, battery);
@@ -510,10 +536,13 @@ static void closeGame(struct Engine* engine) {
 	if (!engine->core) {
 		return;
 	}
-	// Unloading writes the battery save, the clock of games that keep one too
+	// The battery save is written as the game plays (it's mapped): unloading
+	// writes the clock of games that keep one
 	engine->core->unloadROM(engine->core);
 	engine->core->deinit(engine->core);
 	engine->core = NULL;
+	free(engine->video);
+	engine->video = NULL;
 }
 
 static bool isSlotName(const char* slot) {
@@ -643,14 +672,13 @@ static void requestTakeover(struct Engine* engine) {
 // The engine holding the game's lock, from the kernel's list of locks, if
 // it's an engine of ClaudeBoy's: stopped, it saves and lets go
 static void stopHolder(const struct Engine* engine) {
-	char lockPath[PATH_MAX];
-	snprintf(lockPath, sizeof(lockPath), "%s/.lock", engine->saves);
 	struct stat lock;
 	FILE* locks = fopen("/proc/locks", "r");
-	if (stat(lockPath, &lock) != 0 || !locks) {
-		if (locks) {
-			fclose(locks);
-		}
+	if (!locks) {
+		return;
+	}
+	if (fstat(engine->lock, &lock) != 0) {
+		fclose(locks);
 		return;
 	}
 	char line[256];
@@ -660,11 +688,12 @@ static void stopHolder(const struct Engine* engine) {
 		unsigned minor = 0;
 		unsigned long inode = 0;
 		// "1: FLOCK  ADVISORY  WRITE 3849 00:57:88 0 EOF"
-		if (!strstr(line, "FLOCK") || sscanf(strstr(line, "WRITE") ? strstr(line, "WRITE") + 5 : "", "%d %x:%x:%lu", &pid, &major,
-		                                       &minor, &inode) != 4) {
+		const char* write = strstr(line, "WRITE");
+		if (!strstr(line, "FLOCK") || !write || sscanf(write + 5, "%d %x:%x:%lu", &pid, &major, &minor, &inode) != 4) {
 			continue;
 		}
-		if (inode != (unsigned long) lock.st_ino || pid <= 0 || pid == getpid()) {
+		if (inode != (unsigned long) lock.st_ino || major != major(lock.st_dev) || minor != minor(lock.st_dev) || pid <= 0 ||
+		    pid == getpid()) {
 			continue;
 		}
 		char path[64];
@@ -1127,7 +1156,7 @@ static void showFrame(struct Engine* engine, bool isForced) {
 		drawCountdown(frame, wanted->countdown, (double) (now - engine->countdownSinceNs) / 1e9);
 	}
 	if (!isForced && !isNewView && engine->hasShown) {
-		int fps = clampInt(wanted->fps, 1, 60);
+		int fps = wanted->fps;
 		if (wanted->view == VIEW_IMAGE) {
 			int width;
 			int height;
@@ -1223,9 +1252,7 @@ static void startAudio(struct Engine* engine) {
 			dup2(devnull, STDOUT_FILENO);
 			dup2(devnull, STDERR_FILENO);
 		}
-		for (size_t i = 0; i < sizeof(AUDIO_PLAYERS) / sizeof(AUDIO_PLAYERS[0]); i++) {
-			execvp(AUDIO_PLAYERS[i][0], (char* const*) AUDIO_PLAYERS[i]);
-		}
+		execvp(AUDIO_PLAYERS[engine->audioPlayer][0], (char* const*) AUDIO_PLAYERS[engine->audioPlayer]);
 		_exit(127);
 	}
 	close(fds[0]);
@@ -1273,9 +1300,13 @@ static void pumpAudio(struct Engine* engine, bool isHeard) {
 
 	const ssize_t written = write(engine->audioFd, engine->audio, (size_t) count * 4);
 	if (written < 0 && errno == EPIPE) {
+		// The player ended: missing, or no sound device it could open. The
+		// next one is tried with the next frame.
 		stopAudio(engine);
-		engine->isAudioBroken = true;
-		emit("@log no sound: no player started (aplay, pacat or ffplay)");
+		if (++engine->audioPlayer >= sizeof(AUDIO_PLAYERS) / sizeof(AUDIO_PLAYERS[0])) {
+			engine->isAudioBroken = true;
+			emit("@log no sound: none of aplay, pacat or ffplay played");
+		}
 	}
 	// A full pipe drops the rest of this frame's sound
 }
@@ -1305,31 +1336,31 @@ static void base64Decode(const char* text, char* out, size_t size) {
 	out[length] = '\0';
 }
 
-static bool parseView(const char* value, struct Control* control) {
+static void parseView(const char* value, struct Control* control) {
 	int a = 0, b = 0;
 	if (sscanf(value, "cells:%dx%d", &a, &b) == 2) {
 		control->view = VIEW_CELLS;
 		control->columns = clampInt(a, 1, MAX_CELL_COLUMNS);
 		control->rows = clampInt(b, 1, MAX_CELL_ROWS);
-		return true;
+		return;
 	}
 	if (sscanf(value, "image:%dx%d", &a, &b) == 2) {
 		control->view = VIEW_IMAGE;
 		control->boxWidth = clampInt(a, 16, MAX_IMAGE_SIDE);
 		control->boxHeight = clampInt(b, 16, MAX_IMAGE_SIDE);
-		return true;
+		return;
 	}
 	if (!strcmp(value, "window")) {
 		control->view = VIEW_WINDOW;
-		return true;
+		return;
 	}
 	control->view = VIEW_NONE;
-	return !strcmp(value, "none");
 }
 
 static int parseCommands(char* value, struct Command* commands) {
 	int count = 0;
-	for (char* entry = strtok(value, ","); entry && count < MAX_COMMANDS; entry = strtok(NULL, ",")) {
+	char* save = NULL;
+	for (char* entry = strtok_r(value, ",", &save); entry && count < MAX_COMMANDS; entry = strtok_r(NULL, ",", &save)) {
 		struct Command* command = &commands[count];
 		memset(command, 0, sizeof(*command));
 		char* end = NULL;
@@ -1400,7 +1431,7 @@ static void runCommand(struct Engine* engine, const struct Command* command) {
 	engine->lastCommand = command->id;
 	const char* name = command->name;
 	const char* slot = command->arg;
-	const bool isChange = !strcmp(name, "save") || !strcmp(name, "load") || !strcmp(name, "reset");
+	const bool isChange = !strcmp(name, "save") || !strcmp(name, "load");
 	if (isChange && !claimGame(engine)) {
 		emit("@done %ld fail busy: another Claude Code session is playing it", command->id);
 		return;
@@ -1421,16 +1452,12 @@ static void runCommand(struct Engine* engine, const struct Command* command) {
 			statePath(engine, slot, path, sizeof(path));
 			emit("@done %ld fail %s", command->id, access(path, F_OK) == 0 ? "couldn't read that slot" : "that slot is empty");
 		}
-	} else if (!strcmp(name, "reset")) {
-		engine->core->reset(engine->core);
-		engine->mustShow = true;
-		engine->hasPlayedSinceSave = true;
-		emit("@done %ld ok reset", command->id);
-	} else if (!strcmp(name, "refresh")) {
-		engine->mustShow = true;
-		emit("@done %ld ok refreshed", command->id);
 	} else if (!strcmp(name, "takeover")) {
-		requestTakeover(engine);
+		// Already this engine's (the other session paused meanwhile): asking
+		// now would only make it hand the game on to nobody
+		if (!engine->hasLock) {
+			requestTakeover(engine);
+		}
 		emit("@done %ld ok taking", command->id);
 	} else if (!strcmp(name, "quit")) {
 		isStopRequested = 1;
@@ -1573,7 +1600,7 @@ static void tendWindow(struct Engine* engine) {
 	const bool isWanted = engine->wanted.view == VIEW_WINDOW;
 	if (isWanted && !engine->window && !engine->isWindowBroken) {
 		char error[256];
-		engine->window = gameWindowOpen(0, error, sizeof(error));
+		engine->window = gameWindowOpen(error, sizeof(error));
 		if (!engine->window) {
 			engine->isWindowBroken = true;
 			emit("@nowindow %s", error);
@@ -1594,7 +1621,7 @@ static void tendWindow(struct Engine* engine) {
 		return;
 	}
 	layWindow(engine);
-	gameWindowSetSpeed(engine->window, engine->wanted.speed > 0 ? engine->wanted.speed : 1);
+	gameWindowSetSpeed(engine->window, engine->wanted.speed);
 	if (!engine->wanted.isPlaying) {
 		engine->hasShownSincePlay = false;
 		engine->isNotePending = false;
@@ -1717,8 +1744,12 @@ static void layWindow(struct Engine* engine) {
 static struct Engine* windowEngine = NULL;
 
 static void onWindowLost(void) {
-	if (windowEngine && windowEngine->hasPlayedSinceSave && windowEngine->hasLock) {
-		saveState(windowEngine, "auto");
+	if (windowEngine) {
+		if (windowEngine->hasPlayedSinceSave && windowEngine->hasLock) {
+			saveState(windowEngine, "auto");
+		}
+		removeShmFrames(windowEngine);
+		removeRunDir(windowEngine);
 	}
 	emit("@bye");
 }
@@ -1740,6 +1771,10 @@ static int play(const char* romPath, const char* saves, const char* run) {
 	char lockPath[PATH_MAX];
 	snprintf(lockPath, sizeof(lockPath), "%s/.lock", saves);
 	engine.lock = open(lockPath, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+	if (engine.lock < 0) {
+		emit("@error can't open %s: %s", lockPath, strerror(errno));
+		return 1;
+	}
 	windowEngine = &engine;
 	gameWindowOnLost(onWindowLost);
 
@@ -1748,8 +1783,14 @@ static int play(const char* romPath, const char* saves, const char* run) {
 		emit("@error %s", error);
 		return 1;
 	}
-	if (loadState(&engine, "auto")) {
-		engine.hasPlayedSinceSave = false;
+	// The autosave loaded only while no other session plays the game: loading
+	// writes its battery save into battery.sav, which that session's game has
+	// mapped. Taken later, the game loads it then (claimGame).
+	if (flock(engine.lock, LOCK_EX | LOCK_NB) == 0) {
+		if (loadState(&engine, "auto")) {
+			engine.hasPlayedSinceSave = false;
+		}
+		flock(engine.lock, LOCK_UN);
 	}
 	engine.lastSaveNs = monotonicNs();
 	emit("@ready %s %d %s", engine.rom.key, engine.rom.isColor ? 1 : 0, engine.rom.title);
@@ -1847,7 +1888,10 @@ static int play(const char* romPath, const char* saves, const char* run) {
 
 		const int64_t now = monotonicNs();
 		if (now - engine.lastSaveNs >= AUTOSAVE_SECONDS * 1000000000LL) {
-			saveState(&engine, "auto");
+			engine.lastSaveNs = now;
+			if (!saveState(&engine, "auto")) {
+				emit("@log couldn't write the autosave in %s", engine.saves);
+			}
 		}
 		next += FRAME_NS;
 		// Far behind, after a stall: start the clock over rather than race
@@ -1863,6 +1907,9 @@ static int play(const char* romPath, const char* saves, const char* run) {
 	if (engine.hasPlayedSinceSave && engine.hasLock) {
 		saveState(&engine, "auto");
 	}
+	// Unloading writes a clock game's clock into its battery save: while
+	// still holding the game
+	closeGame(&engine);
 	releaseGame(&engine);
 	endTakeover(&engine);
 	removeShmFrames(&engine);
@@ -1870,7 +1917,6 @@ static int play(const char* romPath, const char* saves, const char* run) {
 		gameWindowClose(engine.window);
 	}
 	removeRunDir(&engine);
-	closeGame(&engine);
 	if (engine.tty >= 0) {
 		close(engine.tty);
 	}
@@ -1965,22 +2011,27 @@ static int script(const char* romPath, const char* saves, const char* out, int s
 			int height;
 			pictureSize(clampInt(columns, 16, MAX_IMAGE_SIDE), clampInt(rows, 16, MAX_IMAGE_SIDE), &width, &height);
 			uint8_t* picture = malloc((size_t) width * height * 4);
-			renderPicture(frame, width, height, picture);
 			snprintf(path, sizeof(path), "%s/%s.ppm", out, name);
-			FILE* file = fopen(path, "wb");
+			FILE* file = picture ? fopen(path, "wb") : NULL;
 			if (!file) {
+				free(picture);
 				fprintf(stderr, "can't write %s\n", path);
 				return 1;
 			}
+			renderPicture(frame, width, height, picture);
 			fprintf(file, "P6\n%d %d\n255\n", width, height);
-			for (size_t i = 0; i < (size_t) width * height; i++) {
+			for (size_t p = 0; p < (size_t) width * height; p++) {
 				// The see-through strip shows magenta
-				const uint8_t* pixel = &picture[i * 4];
+				const uint8_t* pixel = &picture[p * 4];
 				const uint8_t rgb[3] = { pixel[3] ? pixel[0] : 255, pixel[3] ? pixel[1] : 0, pixel[3] ? pixel[2] : 255 };
 				fwrite(rgb, 1, 3, file);
 			}
-			fclose(file);
+			const bool isWritten = fclose(file) == 0;
 			free(picture);
+			if (!isWritten) {
+				fprintf(stderr, "can't write %s\n", path);
+				return 1;
+			}
 		} else if (!strncmp(step, "save:", 5) && isSlotName(step + 5)) {
 			if (!saveState(&engine, step + 5)) {
 				fprintf(stderr, "can't save %s\n", step + 5);

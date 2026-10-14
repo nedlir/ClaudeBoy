@@ -11,8 +11,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define WINDOW_SCREEN_WIDTH 160
-#define WINDOW_SCREEN_HEIGHT 144
 #define WINDOW_TYPED_MAX 16
 
 struct GameWindow;
@@ -37,9 +35,9 @@ struct GameWindowEvents {
 };
 
 // Opens the drawer, unmapped, docked to the right edge of the desktop, the
-// game `scale` times its size (0: as large as suits the desktop); NULL with
-// the reason in `error` when there's no display or no X11
-struct GameWindow* gameWindowOpen(int scale, char* error, size_t errorSize);
+// console as large as suits the desktop; NULL with the reason in `error`
+// when there's no display or no X11
+struct GameWindow* gameWindowOpen(char* error, size_t errorSize);
 // Shows the window; `isActivating` asks for the keyboard for it too
 void gameWindowShow(struct GameWindow* window, bool isActivating);
 // Hides the window, fading out, or at once when `isInstant`
