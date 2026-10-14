@@ -34,6 +34,8 @@ const STATUS_ROWS = 2
 
 const SCREEN_WIDTH = 160
 const SCREEN_HEIGHT = 144
+// The engine's wide console, in its own pixels (engine/console.c)
+const WIDE_CONSOLE_WIDTH = 272
 // A cell's size in pixels until the terminal says: most fonts are about
 // twice as tall as wide
 const DEFAULT_CELL = { width: 10, height: 20 }
@@ -92,6 +94,8 @@ let hasDesktop = false
 // A cell's size in pixels, as the engine last read the terminal's; zero while
 // the terminal doesn't say
 let cell = { width: 0, height: 0 }
+// The engine's estimate, from where it found the terminal on the screen
+let isCellEstimated = false
 // The terminal's width in cells, and the drawer's and the desktop's in pixels:
 // how many columns the pane takes to make room for the drawer
 let terminalColumns = 0
@@ -301,7 +305,12 @@ function openPane($: Dollar) {
 // The columns the drawer covers, when the terminal fills the desktop's width
 function drawerColumns(): number {
   if (drawer.width <= 0 || drawer.workWidth <= 0 || terminalColumns <= 0) return DOCK_COLUMNS
-  return Math.ceil((drawer.width * terminalColumns) / drawer.workWidth) + 1
+  const columns = Math.ceil((drawer.width * terminalColumns) / drawer.workWidth) + 1
+  // Where the engine lays the console over the pane instead (it found the
+  // terminal's cells on the screen), wide enough for the wide console at twice
+  // its size; the engine fits whichever shape shows the game largest
+  if (!isCellEstimated) return columns
+  return Math.max(columns, Math.ceil((2 * WIDE_CONSOLE_WIDTH) / cell.width) + 1)
 }
 
 // While the drawer is out, the pane opens beside the transcript as wide as
@@ -473,6 +482,8 @@ function onEngineLine($: Dollar, line: string) {
     case '@cell':
       // Where the terminal fills the desktop, the engine tells its cells' size
       cell = { width: Number(words[0]) || 0, height: Number(words[1]) || 0 }
+      isCellEstimated = cell.width > 0
+      if (wanted.view === 'window' && (phase === 'playing' || phase === 'countdown')) void openDrawerPane($)
       redraw($)
       break
     case '@drawer':
@@ -1193,14 +1204,14 @@ export const register: Register = (on) => {
 
     const mode = pictureMode()
     if (mode === 'window') {
-      // The engine lays the game over this pane's picture box, so it looks
-      // part of the terminal; the pane draws the frame and the status. Where
-      // it can't (another layout, a terminal not filling the desktop) the
-      // game is in the drawer at the screen's edge.
-      const room = layout(e.props.bodyColumns, e.props.scroll.bodyRows, 'image')
+      // The engine lays the console over this pane's body above the status,
+      // so it looks part of the terminal; the pane draws the frame and the
+      // status. Where it can't (another layout, a terminal not filling the
+      // desktop) the console is in the drawer at the screen's edge.
+      const boxRows = Math.max(4, e.props.scroll.bodyRows - STATUS_ROWS)
       const overlay =
         e.props.placement === 'dock' && terminalColumns > 0
-          ? [terminalColumns - e.props.bodyColumns + room.left, 1, room.columns, room.rows].join(',')
+          ? [terminalColumns - e.props.bodyColumns, 1, e.props.bodyColumns, boxRows].join(',')
           : 'none'
       if (overlay !== wanted.overlay) {
         wanted.overlay = overlay
@@ -1209,8 +1220,8 @@ export const register: Register = (on) => {
       const { text, isStrong } = statusLine()
       return (
         <Box flexDirection="column">
-          {overlay !== 'none' ? <Box height={room.rows} /> : <Text dimColor>{(game?.title ?? 'The game') + ' is in the drawer →'}</Text>}
-          <Box marginLeft={overlay !== 'none' ? room.left : 0} flexDirection="column">
+          {overlay !== 'none' ? <Box height={boxRows} /> : <Text dimColor>{(game?.title ?? 'The game') + ' is in the drawer →'}</Text>}
+          <Box flexDirection="column" alignItems={overlay !== 'none' ? 'center' : 'flex-start'}>
             <Text bold={isStrong} wrap="truncate-end">
               {text === 'Click here to play' ? 'Click the game to play' : text}
             </Text>

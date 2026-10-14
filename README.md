@@ -46,9 +46,9 @@ Game Boy and Game Boy Color games both work. It was built against Pokémon Yello
 
 ## Playing
 
-Click the game to give it the keys: the picture in the pane, or the game's
-drawer. In the pane, Esc hands the keys back to the prompt; in the drawer,
-Esc hands you back to Claude.
+Click the game to give it the keys: the picture in the pane, or the console.
+In the pane, Esc hands the keys back to the prompt; on the console, Esc hands
+you back to Claude.
 
 | Game Boy | Key |
 | :- | :- |
@@ -64,6 +64,12 @@ Esc hands you back to Claude.
 | Load a slot | L, then 1–9 |
 | Sound on or off | M (off at first) |
 | Fast-forward ×2, ×4, ×8, then back | F |
+
+Outside kitty and Ghostty the game plays on a Game Boy in Claude's orange,
+drawn in pixel art: its D-pad, A, B, Select and Start light up and press in
+as you hold them, and a third button beside them shows the speed. You can
+also click them: hold the mouse on one to hold it, and click the speed button
+to step the speed as F does.
 
 The game's window sees keys as any game does. Terminals, though, report key
 presses but not releases, so in the pane a lone press is a short tap, and a
@@ -101,18 +107,21 @@ so, and stays out for a minute.
   is sharp. It fills the pane at the Game Boy screen's shape and follows the
   pane and the terminal as they resize or change font.
 - **In any other terminal on a desktop** (GNOME Terminal, Konsole, Alacritty
-  and the rest), ClaudeBoy draws the game itself on top of Claude's side pane.
-  When the terminal is maximized, it works out where the pane's picture
-  belongs on screen from the desktop's work area and the terminal's grid of
-  cells. It lays a borderless game surface exactly there, at a whole-number
-  scale, while Claude Code draws the pane's frame and status lines around
-  it, in the terminal's own font, as in kitty. It fades in and out with the
-  turn. When the terminal isn't maximized its place can't be known, because
-  Wayland doesn't say where windows are. Then the game slides out as a
-  drawer at the right edge of the screen, the pane opening at the same
-  width so the transcript moves aside. Either way Esc hands back early, and
-  you click the game to play if it doesn't take the keyboard by itself. It
-  uses X11, or XWayland on Wayland desktops, loaded only when needed. It
+  and the rest), ClaudeBoy draws the console itself, on top of Claude's side
+  pane. When the terminal is maximized, it works out where the pane is on
+  screen from the desktop's work area and the terminal's grid of cells. It
+  lays the console over the pane's body, cut to its rounded outline, while
+  Claude Code draws the pane's frame and status lines in the terminal's own
+  font. The console is upright where the pane is tall enough and wide where
+  it's short, whichever shows the game larger at a whole-number scale, so
+  every pixel stays sharp. The pane asks for the width the wide console needs
+  at twice its size, though a width you've dragged it to wins. When the
+  terminal isn't maximized its place can't be known, because Wayland doesn't
+  say where windows are. Then the console slides out in a drawer at the right
+  edge of the screen, and the pane opens at the same width so the transcript
+  moves aside. Either way it fades in and out with the turn, and Esc hands
+  back early. Click the console if it doesn't take the keyboard by itself.
+  It uses X11, or XWayland on Wayland desktops, loaded only when needed. It
   stays above other windows while it's out.
 - **With no desktop**, as over SSH: in the pane, drawn with colored
   half-block characters, two pixels per cell. Small panes look blocky.
@@ -150,7 +159,8 @@ size in pixels. The mod paints it in place. The engine also reads the
 terminal's size, in pixels too where the terminal reports it, so the mod can
 refit the picture whenever the terminal changes. `hooks/gamepad.tsx` runs over
 the picture and turns key presses into held buttons. Other terminals get the
-engine's own window (`engine/window.c`). The engine loads `libX11` the first
+engine's own window (`engine/window.c`) with the console drawn around the
+game (`engine/console.c`). The engine loads `libX11` the first
 time the window opens and reads the buttons straight from the window. Keys
 that aren't the Game Boy's, like S, L, M and F, go up to the mod, which sends
 back the window's title. Sound, when on, is played through `aplay`, `pacat`

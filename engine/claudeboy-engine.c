@@ -1344,6 +1344,7 @@ static void tendWindow(struct Engine* engine) {
 		engine->isWindowDismissed = false;
 	}
 	layWindow(engine);
+	gameWindowSetSpeed(engine->window, engine->wanted.speed > 0 ? engine->wanted.speed : 1);
 	if (isWanted && engine->isPlaying && !engine->isWindowDismissed) {
 		gameWindowShow(engine->window);
 	} else {
@@ -1408,7 +1409,7 @@ static bool terminalGrid(struct Engine* engine, int* cellWidth, int* cellHeight,
 	return true;
 }
 
-// Lays the window over the box of cells the mod names, when the terminal's
+// Lays the console over the box of cells the mod names, when the terminal's
 // grid can be found on the screen; docks it as the drawer when not
 static void layWindow(struct Engine* engine) {
 	int cellWidth = 0;
@@ -1426,16 +1427,8 @@ static void layWindow(struct Engine* engine) {
 		gameWindowPlace(engine->window, 0, 0, 0, 0);
 		return;
 	}
-	// The game as large as fits the box at a whole multiple, in its middle
-	const int boxWidth = box[2] * cellWidth;
-	const int boxHeight = box[3] * cellHeight;
-	int scale = boxWidth / WINDOW_SCREEN_WIDTH < boxHeight / WINDOW_SCREEN_HEIGHT ? boxWidth / WINDOW_SCREEN_WIDTH
-	                                                                          : boxHeight / WINDOW_SCREEN_HEIGHT;
-	scale = scale < 1 ? 1 : scale;
-	const int width = WINDOW_SCREEN_WIDTH * scale;
-	const int height = WINDOW_SCREEN_HEIGHT * scale;
-	gameWindowPlace(engine->window, left + box[0] * cellWidth + (boxWidth - width) / 2,
-	                top + box[1] * cellHeight + (boxHeight - height) / 2, width, height);
+	gameWindowPlace(engine->window, left + box[0] * cellWidth, top + box[1] * cellHeight, box[2] * cellWidth,
+	                box[3] * cellHeight);
 }
 
 // The desktop ended under the window: save what was played, then go

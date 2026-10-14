@@ -11,6 +11,8 @@
 
 #include "window.h"
 
+#include "console.h"
+
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,6 +26,7 @@
 
 typedef unsigned long XID;
 typedef XID Window;
+typedef XID Pixmap;
 typedef unsigned long Atom;
 typedef unsigned long Time;
 typedef unsigned long KeySym;
@@ -119,9 +122,28 @@ typedef struct {
 	} data;
 } XClientMessageEvent;
 
+typedef struct {
+	int type;
+	unsigned long serial;
+	Bool sendEvent;
+	Display* display;
+	Window window;
+	Window root;
+	Window subwindow;
+	Time time;
+	int x;
+	int y;
+	int xRoot;
+	int yRoot;
+	unsigned int state;
+	unsigned int button;
+	Bool sameScreen;
+} XButtonEvent;
+
 typedef union {
 	int type;
 	XKeyEvent xkey;
+	XButtonEvent xbutton;
 	XConfigureEvent xconfigure;
 	XClientMessageEvent xclient;
 	long pad[24];
@@ -163,6 +185,8 @@ typedef struct {
 enum {
 	KeyPress = 2,
 	KeyRelease = 3,
+	ButtonPress = 4,
+	ButtonRelease = 5,
 	FocusIn = 9,
 	FocusOut = 10,
 	Expose = 12,
@@ -173,6 +197,8 @@ enum {
 
 #define KeyPressMask (1L << 0)
 #define KeyReleaseMask (1L << 1)
+#define ButtonPressMask (1L << 2)
+#define ButtonReleaseMask (1L << 3)
 #define ExposureMask (1L << 15)
 #define StructureNotifyMask (1L << 17)
 #define SubstructureNotifyMask (1L << 19)
@@ -191,6 +217,8 @@ enum {
 #define PResizeInc (1L << 6)
 #define PAspect (1L << 7)
 #define PBaseSize (1L << 8)
+#define SHAPE_BOUNDING 0
+#define SHAPE_SET 0
 
 static struct {
 	bool isLoaded;
@@ -235,6 +263,9 @@ static struct {
 	Bool (*SetDetectableAutoRepeat)(Display*, Bool, Bool*);
 	void* (*SetErrorHandler)(int (*)(Display*, void*));
 	void* (*SetIOErrorHandler)(int (*)(Display*));
+	Pixmap (*CreateBitmapFromData)(Display*, Window, const char*, unsigned, unsigned);
+	int (*FreePixmap)(Display*, Pixmap);
+	void (*ShapeCombineMask)(Display*, Window, int, int, int, Pixmap, int);
 	Bool (*ShmQueryExtension)(Display*);
 	XImage* (*ShmCreateImage)(Display*, Visual*, unsigned, int, char*, XShmSegmentInfo*, unsigned, unsigned);
 	Bool (*ShmAttach)(Display*, XShmSegmentInfo*);
@@ -300,6 +331,9 @@ static bool loadX11(char* error, size_t errorSize) {
 		FROM(x11, SetErrorHandler, true),
 		FROM(x11, SetIOErrorHandler, true),
 		{ x11, "XkbSetDetectableAutoRepeat", (void**) &X.SetDetectableAutoRepeat, false },
+		FROM(x11, CreateBitmapFromData, true),
+		FROM(x11, FreePixmap, true),
+		FROM(xext, ShapeCombineMask, false),
 		FROM(xext, ShmQueryExtension, false),
 		FROM(xext, ShmCreateImage, false),
 		FROM(xext, ShmAttach, false),
@@ -386,6 +420,23 @@ struct GameWindow {
 	int fade;
 	long long fadeStartMs;
 	Atom opacity;
+
+	// The console around the game, drawn at its own size, then `scale` times
+	// that at `consoleX`, `consoleY`; `drawn` is what it was drawn with, to
+	// draw again only when a button changes
+	struct ConsoleShape shape;
+	int scale;
+	int consoleX;
+	int consoleY;
+	uint32_t art[CONSOLE_MAX_WIDTH * CONSOLE_MAX_HEIGHT];
+	uint32_t drawn;
+	// The window cut to the console's outline, at this size; 0, not cut
+	int cutWidth;
+	int cutScale;
+	// Buttons held with the mouse, the speed button among them, and the speed
+	uint32_t mouseKeys;
+	bool isSpeedHeld;
+	int speed;
 };
 
 #define FADE_MS 160
@@ -563,15 +614,15 @@ static void dock(struct GameWindow* window, int scale) {
 	}
 	const int areaWidth = (int) area[2];
 	const int areaHeight = (int) area[3];
-	if (scale < 1) {
-		// Tall as the desktop allows; never much more than two fifths of its width
-		const int byHeight = (areaHeight - 2 * DRAWER_MARGIN - textArea(window)) / WINDOW_SCREEN_HEIGHT;
-		const int byWidth = (areaWidth * 45 / 100 - 2 * DRAWER_MARGIN) / WINDOW_SCREEN_WIDTH;
-		scale = byHeight < byWidth ? byHeight : byWidth;
-		scale = scale < 2 ? 2 : scale > 8 ? 8 : scale;
-	}
-	window->width = WINDOW_SCREEN_WIDTH * scale + 2 * DRAWER_MARGIN;
-	window->height = areaHeight > 0 ? areaHeight : WINDOW_SCREEN_HEIGHT * scale + 2 * DRAWER_MARGIN + textArea(window);
+	// The console as large as fits the desktop's height, at a whole multiple
+	// of its size, and never much more than two fifths of its width
+	struct ConsoleShape shape;
+	const int fits =
+		consoleFit(areaWidth * 45 / 100 - 2 * DRAWER_MARGIN, areaHeight - 2 * DRAWER_MARGIN - textArea(window), &shape);
+	scale = scale < 1 || scale > fits ? fits : scale;
+	scale = scale > 8 ? 8 : scale;
+	window->width = shape.width * scale + 2 * DRAWER_MARGIN;
+	window->height = areaHeight > 0 ? areaHeight : shape.height * scale + 2 * DRAWER_MARGIN + textArea(window);
 	window->dockX = (int) area[0] + areaWidth - window->width;
 	window->dockY = (int) area[1];
 	window->dockWidth = window->width;
@@ -598,8 +649,21 @@ void gameWindowWorkArea(struct GameWindow* window, int* x, int* y, int* width, i
 	*height = window->workHeight;
 }
 
-void gameWindowPlace(struct GameWindow* window, int x, int y, int width, int height) {
-	const bool isOverlay = width > 0 && height > 0;
+void gameWindowPlace(struct GameWindow* window, int boxX, int boxY, int boxWidth, int boxHeight) {
+	const bool isOverlay = boxWidth > 0 && boxHeight > 0;
+	// The console as large as fits the box at a whole multiple, in its middle
+	int x = 0;
+	int y = 0;
+	int width = 0;
+	int height = 0;
+	if (isOverlay) {
+		struct ConsoleShape shape;
+		const int scale = consoleFit(boxWidth, boxHeight, &shape);
+		width = shape.width * scale;
+		height = shape.height * scale;
+		x = boxX + (boxWidth - width) / 2;
+		y = boxY + (boxHeight - height) / 2;
+	}
 	if (isOverlay == window->isOverlay && (!isOverlay || (x == window->overlayX && y == window->overlayY &&
 	                                                     width == window->overlayWidth && height == window->overlayHeight))) {
 		return;
@@ -695,7 +759,9 @@ struct GameWindow* gameWindowOpen(int scale, char* error, size_t errorSize) {
 	window->window = X.CreateSimpleWindow(display, window->root, window->dockX, window->dockY, (unsigned) window->width,
 	                                      (unsigned) window->height, 0, 0, pixelOf(window, DRAWER_COLOR));
 	loadFont(window);
-	X.SelectInput(display, window->window, KeyPressMask | KeyReleaseMask | ExposureMask | StructureNotifyMask | FocusChangeMask);
+	X.SelectInput(display, window->window,
+	              KeyPressMask | KeyReleaseMask | ButtonPressMask | ButtonReleaseMask | ExposureMask | StructureNotifyMask |
+	                  FocusChangeMask);
 
 	window->deleteWindow = X.InternAtom(display, "WM_DELETE_WINDOW", 0);
 	X.SetWMProtocols(display, window->window, &window->deleteWindow, 1);
@@ -771,6 +837,8 @@ void gameWindowShow(struct GameWindow* window) {
 // Fades out, then unmaps; the keys let go at once
 void gameWindowHide(struct GameWindow* window) {
 	window->keys = 0;
+	window->mouseKeys = 0;
+	window->isSpeedHeld = false;
 	memset(window->pressed, 0, sizeof(window->pressed));
 	if (!window->isShown || window->fade < 0) {
 		return;
@@ -797,6 +865,13 @@ static void animate(struct GameWindow* window) {
 	}
 	window->needsDrawing = true;
 	X.Flush(window->display);
+}
+
+void gameWindowSetSpeed(struct GameWindow* window, int speed) {
+	if (speed != window->speed) {
+		window->speed = speed;
+		window->needsDrawing = true;
+	}
 }
 
 void gameWindowSetTitle(struct GameWindow* window, const char* utf8) {
@@ -882,12 +957,39 @@ void gameWindowPump(struct GameWindow* window, struct GameWindowEvents* events) 
 			}
 			break;
 		}
+		case ButtonPress:
+		case ButtonRelease: {
+			if (event.xbutton.button != 1 || window->scale < 1) {
+				break;
+			}
+			// The console's buttons press as they're clicked, held while held
+			if (event.type == ButtonRelease) {
+				window->mouseKeys = 0;
+				window->isSpeedHeld = false;
+				window->needsDrawing = true;
+				break;
+			}
+			const int button = consoleButtonAt(window->shape, (double) (event.xbutton.x - window->consoleX) / window->scale,
+			                                   (double) (event.xbutton.y - window->consoleY) / window->scale);
+			if (button == CONSOLE_SPEED) {
+				window->isSpeedHeld = true;
+				if (events->typedCount < WINDOW_TYPED_MAX) {
+					events->typed[events->typedCount++] = 'f';
+				}
+			} else if (button >= 0) {
+				window->mouseKeys |= 1u << button;
+			}
+			window->needsDrawing = true;
+			break;
+		}
 		case FocusIn:
 			events->focus = 1;
 			break;
 		case FocusOut:
 			// Keys let go elsewhere would otherwise stay held
 			window->keys = 0;
+			window->mouseKeys = 0;
+			window->isSpeedHeld = false;
 			memset(window->pressed, 0, sizeof(window->pressed));
 			events->focus = 0;
 			break;
@@ -918,7 +1020,7 @@ void gameWindowPump(struct GameWindow* window, struct GameWindowEvents* events) 
 			break;
 		}
 	}
-	events->keys = window->keys;
+	events->keys = window->keys | window->mouseKeys;
 	events->needsDrawing = window->needsDrawing && window->isShown;
 	window->needsDrawing = false;
 }
@@ -995,61 +1097,116 @@ static bool fitImage(struct GameWindow* window) {
 	return true;
 }
 
+// Cuts the window to the console's outline where it's laid over the
+// terminal, so the terminal shows around its rounded corners; uncut as the
+// drawer
+static void cut(struct GameWindow* window) {
+	const int width = window->isOverlay ? window->shape.width : 0;
+	if (!X.ShapeCombineMask || (width == window->cutWidth && window->scale == window->cutScale)) {
+		return;
+	}
+	window->cutWidth = width;
+	window->cutScale = window->scale;
+	if (!width) {
+		X.ShapeCombineMask(window->display, window->window, SHAPE_BOUNDING, 0, 0, 0, SHAPE_SET);
+		return;
+	}
+	const int scale = window->scale;
+	const int maskWidth = window->shape.width * scale;
+	const int maskHeight = window->shape.height * scale;
+	const int pitch = (maskWidth + 7) / 8;
+	char* bits = calloc((size_t) pitch * maskHeight, 1);
+	if (!bits) {
+		return;
+	}
+	for (int y = 0; y < maskHeight; y++) {
+		const uint32_t* source = &window->art[(y / scale) * window->shape.width];
+		for (int x = 0; x < maskWidth; x++) {
+			if (source[x / scale] >> 24) {
+				bits[y * pitch + x / 8] |= (char) (1 << (x % 8));
+			}
+		}
+	}
+	const Pixmap mask = X.CreateBitmapFromData(window->display, window->window, bits, (unsigned) maskWidth, (unsigned) maskHeight);
+	free(bits);
+	X.ShapeCombineMask(window->display, window->window, SHAPE_BOUNDING, 0, 0, mask, SHAPE_SET);
+	X.FreePixmap(window->display, mask);
+}
+
 void gameWindowDraw(struct GameWindow* window, const uint32_t* frame) {
 	if (!window->isShown || window->width <= 0 || window->height <= 0 || !fitImage(window)) {
 		return;
 	}
 	const int width = window->width;
 	const int height = window->height;
-	// The game and the status under it, together in the middle of the drawer
+	// The console and the status under it, together in the middle of the
+	// drawer; laid over its box, the window is the console's own size
 	const int text = textArea(window);
-	// Laid over its box, the window is the game's own size: no margin
 	const int margin = window->isOverlay ? 0 : DRAWER_MARGIN;
-	const int roomWidth = (width - 2 * margin) / WINDOW_SCREEN_WIDTH;
-	const int roomHeight = (height - 2 * margin - text) / WINDOW_SCREEN_HEIGHT;
-	int scale = roomWidth < roomHeight ? roomWidth : roomHeight;
-	if (scale < 1) {
-		scale = 1;
-	}
-	const int pictureWidth = WINDOW_SCREEN_WIDTH * scale;
-	const int pictureHeight = WINDOW_SCREEN_HEIGHT * scale;
-	// The drawer's game slides in a little as it fades in
+	struct ConsoleShape shape;
+	const int scale = consoleFit(width - 2 * margin, height - 2 * margin - text, &shape);
+	const int consoleWidth = shape.width * scale;
+	const int consoleHeight = shape.height * scale;
+	// The drawer's console slides in a little as it fades in
 	int slide = 0;
 	if (window->fade > 0 && !window->isOverlay) {
 		double t = (double) (nowMs() - window->fadeStartMs) / FADE_MS;
 		t = t > 1 ? 1 : t;
 		slide = (int) ((1 - t) * (1 - t) * SLIDE_PX);
 	}
-	const int left = (width - pictureWidth) / 2 + slide;
-	const int top = (height - pictureHeight - text) / 2;
+	const int left = (width - consoleWidth) / 2 + slide;
+	const int top = (height - consoleHeight - text) / 2;
+
+	// The console drawn again when its shape or a button changes; else only
+	// the screen in it
+	const uint32_t keys = window->keys | window->mouseKeys;
+	const uint32_t drawn = keys | (uint32_t) shape.isWide << 8 | (uint32_t) window->isSpeedHeld << 9 |
+	                       (uint32_t) window->speed << 10 | 1u << 31;
+	if (drawn != window->drawn || shape.isWide != window->shape.isWide) {
+		consoleDraw(shape, frame, keys, window->isSpeedHeld, window->speed, true, window->art);
+		window->drawn = drawn;
+	} else {
+		int screenX;
+		int screenY;
+		consoleScreen(shape, &screenX, &screenY);
+		for (int y = 0; y < WINDOW_SCREEN_HEIGHT; y++) {
+			uint32_t* row = &window->art[(screenY + y) * shape.width + screenX];
+			const uint32_t* source = &frame[y * WINDOW_SCREEN_WIDTH];
+			for (int x = 0; x < WINDOW_SCREEN_WIDTH; x++) {
+				row[x] = source[x] | 0xFF000000u;
+			}
+		}
+	}
+	window->shape = shape;
+	window->scale = scale;
+	window->consoleX = left;
+	window->consoleY = top;
+	cut(window);
+
 	const uint32_t border = (uint32_t) pixelOf(window, DRAWER_COLOR);
 	char* data = window->image->data;
 	const int pitch = window->image->bytesPerLine;
-
 	for (int y = 0; y < height; y++) {
 		uint32_t* row = (uint32_t*) (data + (size_t) y * pitch);
-		const int pictureY = y - top;
-		if (pictureY < 0 || pictureY >= pictureHeight) {
+		const int consoleY = y - top;
+		if (consoleY < 0 || consoleY >= consoleHeight) {
 			for (int x = 0; x < width; x++) {
 				row[x] = border;
 			}
 			continue;
 		}
-		// Each of the screen's rows is `scale` rows here: the rest copy the first
-		if (pictureY % scale != 0 && y > 0) {
+		// Each of the console's rows is `scale` rows here: the rest copy the first
+		if (consoleY % scale != 0 && y > 0) {
 			memcpy(row, data + (size_t) (y - 1) * pitch, (size_t) width * 4);
 			continue;
 		}
-		const uint32_t* source = &frame[(pictureY / scale) * WINDOW_SCREEN_WIDTH];
+		const uint32_t* source = &window->art[(consoleY / scale) * shape.width];
 		for (int x = 0; x < width; x++) {
-			const int pictureX = x - left;
-			if (pictureX < 0 || pictureX >= pictureWidth) {
-				row[x] = border;
-				continue;
-			}
-			const uint32_t rgb = source[pictureX / scale];
-			row[x] = ((rgb >> 16) & 0xFF) << window->redShift | ((rgb >> 8) & 0xFF) << window->greenShift |
-			         (rgb & 0xFF) << window->blueShift;
+			const int consoleX = x - left;
+			const uint32_t argb = consoleX < 0 || consoleX >= consoleWidth ? 0 : source[consoleX / scale];
+			row[x] = !(argb >> 24) ? border
+			                       : ((argb >> 16) & 0xFF) << window->redShift | ((argb >> 8) & 0xFF) << window->greenShift |
+			                             (argb & 0xFF) << window->blueShift;
 		}
 	}
 
@@ -1068,7 +1225,7 @@ void gameWindowDraw(struct GameWindow* window, const uint32_t* frame) {
 			const int length = (int) strlen(window->lines[line]);
 			X.SetForeground(window->display, window->textGc, pixelOf(window, line == 0 ? TEXT_COLOR : DIM_TEXT_COLOR));
 			X.DrawString(window->display, window->window, window->textGc, left,
-			             top + pictureHeight + 10 + window->ascent + line * window->lineHeight, window->lines[line],
+			             top + consoleHeight + 10 + window->ascent + line * window->lineHeight, window->lines[line],
 			             length < most ? length : most);
 		}
 	}

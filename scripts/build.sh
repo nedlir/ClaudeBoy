@@ -59,7 +59,7 @@ extra=()
 if [ "$(uname)" = Linux ]; then extra+=(-lrt -ldl); fi
 cc -O2 -std=gnu11 -Wall -Wno-format-truncation \
   -I"$LIBRARY/include" -I"$SOURCE/include" \
-  "$ROOT/engine/claudeboy-engine.c" "$ROOT/engine/window.c" "$LIBRARY/libmgba.a" -lm -lpthread "${extra[@]}" \
+  "$ROOT/engine/claudeboy-engine.c" "$ROOT/engine/window.c" "$ROOT/engine/console.c" "$LIBRARY/libmgba.a" -lm -lpthread "${extra[@]}" \
   -o "$ROOT/dist/claudeboy-engine.part"
 mv "$ROOT/dist/claudeboy-engine.part" "$ROOT/dist/claudeboy-engine"
 echo "Built $ROOT/dist/claudeboy-engine"

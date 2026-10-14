@@ -658,20 +658,23 @@ test('the pane opens as wide as the drawer, so the transcript moves aside', SLOW
   expect(world.closes).toBeGreaterThan(0)
 })
 
-test('in a maximized terminal the game is laid over the pane\'s picture box', SLOW, async ($, on) => {
+test('in a maximized terminal the console is laid over the pane, made wide enough for it', SLOW, async ($, on) => {
   const clock = mock.clock(on)
   const world = stubClaudeCode(on, clock, { env: { DISPLAY: ':0' } })
   await startSession($)
 
   await $.turn.start({ turnId: 't1', text: 'refactor auth' })
   await clock.advance(2000)
-  // 120 columns of 10 by 22 pixels, the pane's body the rightmost 51
+  // 120 columns of 10 by 22 pixels, found on the screen by the engine
   world.engine.push('@term 120 32 0 0')
+  world.engine.push('@drawer 464 1214')
   world.engine.push('@cell 10 22')
   await clock.settle()
-  const game = await $.ui.mount({ ...GAME, props: { ...GAME.props, bodyColumns: 51, scroll: { offset: 0, bodyRows: 25 } } })
-  // 51 columns hold the screen in 21 rows of 22 pixels; the box starts at
-  // column 69, below the pane's top row
-  expect(world.control()).toContain(' overlay=69,1,51,21 ')
+  // The pane asks for room for the wide console at twice its 272 pixels
+  expect(world.openColumns.at(-1)).toBe(56)
+  const game = await $.ui.mount({ ...GAME, props: { ...GAME.props, bodyColumns: 56, scroll: { offset: 0, bodyRows: 25 } } })
+  // The box: the pane's body from column 64, below its top row, all but the
+  // two status rows
+  expect(world.control()).toContain(' overlay=64,1,56,23 ')
   expect(await game.find({ text: /Click the game to play/ })).toBeDefined()
 })
