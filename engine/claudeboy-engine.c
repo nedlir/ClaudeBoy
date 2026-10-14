@@ -13,6 +13,7 @@
 #include <mgba/internal/gb/overrides.h>
 #include <mgba-util/vfs.h>
 
+#include "frontmost.h"
 #include "window.h"
 
 #include <ctype.h>
@@ -236,6 +237,12 @@ struct Engine {
 	// The game's window, its title, and the buttons held in it
 	struct GameWindow* window;
 	bool isWindowBroken;
+	// The window has the keyboard; it was shown since play began, so showing
+	// it again (the terminal back in front) leaves the keyboard where it is
+	bool hasWindowFocus;
+	bool hasShownSincePlay;
+	// Since when the terminal has been behind, or 0
+	int64_t behindSinceNs;
 	uint32_t windowKeys;
 	char windowTitle[256];
 	// A terminal cell's size as last told to the mod
@@ -1560,6 +1567,11 @@ static void tendWindow(struct Engine* engine) {
 			return;
 		}
 		engine->windowTitle[0] = '\0';
+		// Shown only while this session's terminal tab is in front: the mod
+		// draws the run folder's name in the pane, under the window, to tell
+		// which tab that is
+		const char* slash = strrchr(engine->run, '/');
+		frontmostStart(slash ? slash + 1 : engine->run);
 		int width;
 		int workWidth;
 		gameWindowDrawer(engine->window, &width, &workWidth);
@@ -1570,8 +1582,24 @@ static void tendWindow(struct Engine* engine) {
 	}
 	layWindow(engine);
 	gameWindowSetSpeed(engine->window, engine->wanted.speed > 0 ? engine->wanted.speed : 1);
-	if (isWanted && engine->isPlaying) {
-		gameWindowShow(engine->window);
+	if (!engine->wanted.isPlaying) {
+		engine->hasShownSincePlay = false;
+	}
+	// Away from the terminal (another window, another tab), the window goes
+	// too, unless it has the keyboard itself. Clicking the window puts the
+	// terminal behind a moment before the window gets the keyboard: so only
+	// once it's been behind a while.
+	if (frontmostState() == FRONTMOST_BEHIND && !engine->hasWindowFocus) {
+		if (!engine->behindSinceNs) {
+			engine->behindSinceNs = monotonicNs();
+		}
+	} else {
+		engine->behindSinceNs = 0;
+	}
+	const bool isTerminalBehind = engine->behindSinceNs && monotonicNs() - engine->behindSinceNs > 400000000LL;
+	if (isWanted && engine->isPlaying && !isTerminalBehind) {
+		gameWindowShow(engine->window, !engine->hasShownSincePlay);
+		engine->hasShownSincePlay = true;
 	} else {
 		gameWindowHide(engine->window);
 	}
@@ -1587,6 +1615,7 @@ static void tendWindow(struct Engine* engine) {
 		emit("@key %c", events.typed[i]);
 	}
 	if (events.focus >= 0) {
+		engine->hasWindowFocus = events.focus == 1;
 		emit("@focus %d", events.focus);
 	}
 	if (events.isClosed) {

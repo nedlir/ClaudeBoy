@@ -416,6 +416,9 @@ struct GameWindow {
 	int overlayWidth;
 	int overlayHeight;
 
+	// Asks for the keyboard once mapped
+	bool isActivating;
+
 	// Fading in (1) or out (-1) since `fadeStartMs`, or still (0)
 	int fade;
 	long long fadeStartMs;
@@ -803,7 +806,7 @@ struct GameWindow* gameWindowOpen(int scale, char* error, size_t errorSize) {
 	return window;
 }
 
-void gameWindowShow(struct GameWindow* window) {
+void gameWindowShow(struct GameWindow* window, bool isActivating) {
 	if (window->isShown) {
 		// Fading out: fade back in from as far as it got
 		if (window->fade < 0) {
@@ -813,6 +816,7 @@ void gameWindowShow(struct GameWindow* window) {
 		}
 		return;
 	}
+	window->isActivating = isActivating;
 	// Each time in its place, above the other windows, fading in
 	X.ChangeProperty(window->display, window->window, window->wmState, XA_ATOM, 32, PropModeReplace,
 	                 (const unsigned char*) window->wmStates, 3);
@@ -1010,7 +1014,9 @@ void gameWindowPump(struct GameWindow* window, struct GameWindowEvents* events) 
 			window->needsDrawing = true;
 			break;
 		case MapNotify:
-			activate(window);
+			if (window->isActivating) {
+				activate(window);
+			}
 			window->needsDrawing = true;
 			break;
 		case ClientMessage:

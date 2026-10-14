@@ -124,8 +124,14 @@ rest of the turn.
   edge of the screen, and the pane opens at the same width so the transcript
   moves aside. Either way it fades in and out with the turn, and Esc hands
   back early. Click the console if it doesn't take the keyboard by itself.
-  It uses X11, or XWayland on Wayland desktops, loaded only when needed. It
-  stays above other windows while it's out.
+  It uses X11, or XWayland on Wayland desktops, loaded only when needed.
+  It shows only while the terminal tab holding the session is in front.
+  Switch to another app or another tab and it goes; come back and it
+  returns, leaving the keyboard where it was. ClaudeBoy learns this from the
+  desktop's accessibility bus (AT-SPI), which GNOME Terminal, Konsole and
+  most terminals report to. It recognizes its own tab by a short id the pane
+  draws under the console. Without the bus, the console stays above other
+  windows while it's out.
 - **With no desktop**, as over SSH: in the pane, drawn with colored
   half-block characters, two pixels per cell. Small panes look blocky.
 

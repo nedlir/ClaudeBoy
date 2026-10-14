@@ -740,6 +740,11 @@ test('in a maximized terminal the console is laid over the pane, made wide enoug
   // two status rows
   expect(world.control()).toContain(' overlay=64,1,56,23 ')
   expect(await game.find({ text: /Click the game to play/ })).toBeDefined()
+  // Under the console, the run folder's name: how the engine tells which
+  // terminal tab is this session's, to show the console only while it's in front
+  const runFolder = world.spawns.at(-1)?.at(-1)?.split('/').at(-1) ?? 'none'
+  expect(runFolder).toMatch(/^claudeboy-/)
+  expect(await game.find({ text: new RegExp(runFolder) })).toBeDefined()
 })
 
 test('the countdown shows on the game; Esc on the console keeps playing, and the next Esc goes back', SLOW, async ($, on) => {

@@ -38,7 +38,8 @@ struct GameWindowEvents {
 // game `scale` times its size (0: as large as suits the desktop); NULL with
 // the reason in `error` when there's no display or no X11
 struct GameWindow* gameWindowOpen(int scale, char* error, size_t errorSize);
-void gameWindowShow(struct GameWindow* window);
+// Shows the window; `isActivating` asks for the keyboard for it too
+void gameWindowShow(struct GameWindow* window, bool isActivating);
 void gameWindowHide(struct GameWindow* window);
 void gameWindowSetTitle(struct GameWindow* window, const char* utf8);
 // The speed the console's speed button shows

@@ -756,6 +756,13 @@ function hintLine(): string {
   return 'S save · L load · M sound ' + (isSoundOn ? 'off' : 'on') + ' · F ' + (nextSpeed() > 1 ? 'speed ×' + nextSpeed() : 'normal speed')
 }
 
+// The engine's run folder's name, drawn in the pane under the game window:
+// the engine finds the terminal tab whose screen shows it, to show the window
+// only while that tab is in front
+function marker(): string {
+  return runDir ? runDir.slice(runDir.lastIndexOf('/') + 1) : ''
+}
+
 // The drawer's two lines under the game: what's going on, then what keys do
 function windowTitle(): string {
   const status = statusLine().text.replace(' · ' + CONTROLS, '')
@@ -1313,7 +1320,13 @@ export const register: Register = (on) => {
       const { text, isStrong } = statusLine()
       return (
         <Box flexDirection="column">
-          {overlay !== 'none' ? <Box height={boxRows} /> : <Text dimColor>{(game?.title ?? 'The game') + ' is in the drawer →'}</Text>}
+          {overlay !== 'none' ? (
+            <Box height={boxRows} alignItems="center" justifyContent="center">
+              <Text dimColor>{marker()}</Text>
+            </Box>
+          ) : (
+            <Text dimColor>{(game?.title ?? 'The game') + ' is in the drawer → ' + marker()}</Text>
+          )}
           <Box flexDirection="column" alignItems={overlay !== 'none' ? 'center' : 'flex-start'}>
             <Text bold={isStrong} wrap="truncate-end">
               {text === 'Click here to play' ? 'Click the game to play' : text}
