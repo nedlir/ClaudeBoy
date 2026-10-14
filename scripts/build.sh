@@ -55,11 +55,11 @@ fi
 
 echo "Building the engine…"
 extra=()
-# glibc before 2.34 keeps shm_open in librt
-if [ "$(uname)" = Linux ]; then extra+=(-lrt); fi
+# glibc before 2.34 keeps shm_open in librt, and dlopen in libdl
+if [ "$(uname)" = Linux ]; then extra+=(-lrt -ldl); fi
 cc -O2 -std=gnu11 -Wall -Wno-format-truncation \
   -I"$LIBRARY/include" -I"$SOURCE/include" \
-  "$ROOT/engine/claudeboy-engine.c" "$LIBRARY/libmgba.a" -lm -lpthread "${extra[@]}" \
+  "$ROOT/engine/claudeboy-engine.c" "$ROOT/engine/window.c" "$LIBRARY/libmgba.a" -lm -lpthread "${extra[@]}" \
   -o "$ROOT/dist/claudeboy-engine.part"
 mv "$ROOT/dist/claudeboy-engine.part" "$ROOT/dist/claudeboy-engine"
 echo "Built $ROOT/dist/claudeboy-engine"

@@ -13,6 +13,8 @@
 #include <mgba/internal/gb/overrides.h>
 #include <mgba-util/vfs.h>
 
+#include "window.h"
+
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -46,7 +48,8 @@ static const char USAGE[] =
 	"      one line the mod rewrites in place, such as\n"
 	"        play=1 keys=17 taps=3,0,0,0,0,0,0,0 view=cells:160x72 fps=30\n"
 	"        sound=1 speed=1 cmds=7:save:2,8:load:auto\n"
-	"      (view=image:<w>x<h> asks for pictures that size in pixels instead)\n"
+	"      (view=image:<w>x<h> asks for pictures that size in pixels instead,\n"
+	"      view=window for a window of its own, titled by title=<base64>)\n"
 	"      and writes one line on stdout per event:\n"
 	"        @ready <save-key> <color 0|1> <title>\n"
 	"        @term <cols> <rows> <x-pixels> <y-pixels>  the terminal's size\n"
@@ -56,6 +59,10 @@ static const char USAGE[] =
 	"        @saved <slot> <unix-ms>         a save state was written\n"
 	"        @playing, @paused\n"
 	"        @busy                           another session is playing it\n"
+	"        @key <letter or digit>          typed in the game's window\n"
+	"        @closed                         the person closed the window\n"
+	"        @focus 1|0                      the window got or lost the keys\n"
+	"        @nowindow <words>               no window can open here\n"
 	"        @log <words>, @error <words>\n"
 	"        @bye                            saved, and gone\n"
 	"\n"
@@ -122,6 +129,8 @@ enum ViewKind {
 	VIEW_CELLS,
 	// Raw RGB in shared memory for the mod's Image: terminals with pictures
 	VIEW_IMAGE,
+	// A window of its own, for terminals without pictures
+	VIEW_WINDOW,
 };
 
 struct Control {
@@ -136,6 +145,7 @@ struct Control {
 	int fps;
 	bool isSoundOn;
 	int speed;
+	char title[256];
 };
 
 struct Command {
@@ -194,6 +204,13 @@ struct Engine {
 	int64_t lastShownNs;
 	unsigned seq;
 	unsigned shmFrames;
+
+	// The game's window, its title, and the buttons held in it
+	struct GameWindow* window;
+	bool isWindowBroken;
+	bool isWindowDismissed;
+	uint32_t windowKeys;
+	char windowTitle[256];
 
 	// The terminal Claude Code draws in, read for its size alone
 	int tty;
@@ -899,6 +916,15 @@ static void showFrame(struct Engine* engine, bool isForced) {
 			engine->seq = seq;
 			emit("@cells %u %d %d", seq, wanted->columns, wanted->rows);
 		}
+	} else if (wanted->view == VIEW_WINDOW) {
+		isShown = engine->window != NULL;
+		if (isShown) {
+			static uint32_t rgb[WIDTH * HEIGHT];
+			for (int i = 0; i < WIDTH * HEIGHT; i++) {
+				rgb[i] = rgbOf(frame[i]);
+			}
+			gameWindowDraw(engine->window, rgb);
+		}
 	} else {
 		isShown = writeShmFrame(engine, frame, wanted->boxWidth, wanted->boxHeight);
 	}
@@ -1003,6 +1029,29 @@ static void pumpAudio(struct Engine* engine, bool isHeard) {
 
 // --- The control file ------------------------------------------------------
 
+// Decodes base64 text into `out`, as a string cut short to fit
+static void base64Decode(const char* text, char* out, size_t size) {
+	static const char ALPHABET[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	uint32_t buffer = 0;
+	int bits = 0;
+	size_t length = 0;
+	for (const char* c = text; *c && *c != '='; c++) {
+		const char* at = strchr(ALPHABET, *c);
+		if (!at) {
+			break;
+		}
+		buffer = (buffer << 6) | (uint32_t) (at - ALPHABET);
+		bits += 6;
+		if (bits >= 8) {
+			bits -= 8;
+			if (length + 1 < size) {
+				out[length++] = (char) ((buffer >> bits) & 0xFF);
+			}
+		}
+	}
+	out[length] = '\0';
+}
+
 static bool parseView(const char* value, struct Control* control) {
 	int a = 0, b = 0;
 	if (sscanf(value, "cells:%dx%d", &a, &b) == 2) {
@@ -1015,6 +1064,10 @@ static bool parseView(const char* value, struct Control* control) {
 		control->view = VIEW_IMAGE;
 		control->boxWidth = clampInt(a, 16, MAX_IMAGE_SIDE);
 		control->boxHeight = clampInt(b, 16, MAX_IMAGE_SIDE);
+		return true;
+	}
+	if (!strcmp(value, "window")) {
+		control->view = VIEW_WINDOW;
 		return true;
 	}
 	control->view = VIEW_NONE;
@@ -1075,6 +1128,8 @@ static void parseControl(char* line, struct Control* control, struct Command* co
 			control->isSoundOn = atoi(value) != 0;
 		} else if (!strcmp(token, "speed")) {
 			control->speed = clampInt(atoi(value), 1, 8);
+		} else if (!strcmp(token, "title")) {
+			base64Decode(value, control->title, sizeof(control->title));
 		} else if (!strcmp(token, "cmds")) {
 			*commandCount = parseCommands(value, commands);
 		}
@@ -1248,6 +1303,69 @@ static void watchTerminal(struct Engine* engine, bool isForced) {
 	emit("@term %u %u %u %u", size.ws_col, size.ws_row, size.ws_xpixel, size.ws_ypixel);
 }
 
+// --- The window ------------------------------------------------------------
+
+// Opens the window the first time the mod asks for one, shows it while the
+// game plays in it, and passes on what happened in it
+static void tendWindow(struct Engine* engine) {
+	const bool isWanted = engine->wanted.view == VIEW_WINDOW;
+	if (isWanted && !engine->window && !engine->isWindowBroken) {
+		char error[256];
+		engine->window = gameWindowOpen(0, error, sizeof(error));
+		if (!engine->window) {
+			engine->isWindowBroken = true;
+			emit("@nowindow %s", error);
+			return;
+		}
+		engine->windowTitle[0] = '\0';
+	}
+	if (!engine->window) {
+		return;
+	}
+	if (!engine->wanted.isPlaying) {
+		engine->isWindowDismissed = false;
+	}
+	if (isWanted && engine->isPlaying && !engine->isWindowDismissed) {
+		gameWindowShow(engine->window);
+	} else {
+		gameWindowHide(engine->window);
+	}
+	if (engine->wanted.title[0] && strcmp(engine->wanted.title, engine->windowTitle) != 0) {
+		snprintf(engine->windowTitle, sizeof(engine->windowTitle), "%s", engine->wanted.title);
+		gameWindowSetTitle(engine->window, engine->windowTitle);
+	}
+
+	struct GameWindowEvents events;
+	gameWindowPump(engine->window, &events);
+	engine->windowKeys = events.keys;
+	for (int i = 0; i < events.typedCount; i++) {
+		emit("@key %c", events.typed[i]);
+	}
+	if (events.focus >= 0) {
+		emit("@focus %d", events.focus);
+	}
+	if (events.isClosed) {
+		// Gone at once; the mod pauses the game, which saves it
+		engine->isWindowDismissed = true;
+		engine->windowKeys = 0;
+		gameWindowHide(engine->window);
+		emit("@closed");
+	}
+	if (events.needsDrawing) {
+		engine->mustShow = true;
+	}
+}
+
+// The desktop ended under the window: save what was played, then go
+static struct Engine* windowEngine = NULL;
+
+static void onWindowLost(void) {
+	if (windowEngine && windowEngine->hasPlayedSinceSave && windowEngine->hasLock) {
+		saveState(windowEngine, "auto");
+	}
+	emit("@bye");
+}
+
 // --- Playing ---------------------------------------------------------------
 
 static int play(const char* romPath, const char* saves, const char* run) {
@@ -1265,6 +1383,8 @@ static int play(const char* romPath, const char* saves, const char* run) {
 	char lockPath[PATH_MAX];
 	snprintf(lockPath, sizeof(lockPath), "%s/.lock", saves);
 	engine.lock = open(lockPath, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+	windowEngine = &engine;
+	gameWindowOnLost(onWindowLost);
 
 	char error[512];
 	if (!openGame(&engine, romPath, error, sizeof(error))) {
@@ -1283,6 +1403,7 @@ static int play(const char* romPath, const char* saves, const char* run) {
 	while (!isStopRequested) {
 		readControl(&engine);
 		watchTerminal(&engine, false);
+		tendWindow(&engine);
 		// Claude Code went away without telling: save and go too
 		if (isStopRequested || getppid() != parent) {
 			break;
@@ -1330,7 +1451,7 @@ static int play(const char* romPath, const char* saves, const char* run) {
 			stopAudio(&engine);
 		}
 		for (int i = 0; i < engine.wanted.speed; i++) {
-			runFrame(&engine, engine.wanted.keys);
+			runFrame(&engine, engine.wanted.keys | engine.windowKeys);
 			pumpAudio(&engine, !isFast);
 		}
 		engine.hasPlayedSinceSave = true;
@@ -1357,6 +1478,9 @@ static int play(const char* romPath, const char* saves, const char* run) {
 	}
 	releaseGame(&engine);
 	removeShmFrames(&engine);
+	if (engine.window) {
+		gameWindowClose(engine.window);
+	}
 	closeGame(&engine);
 	if (engine.tty >= 0) {
 		close(engine.tty);

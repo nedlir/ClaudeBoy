@@ -550,3 +550,86 @@ test('F steps the speed up to ×2, then ×4, then back to ×1', SLOW, async ($, 
   }
   expect(speeds).toEqual(['2', '4', '1'])
 })
+
+// The window's title as the engine reads it out of the control line
+function titleOf(line: string): string {
+  const encoded = / title=(\S+)/.exec(line)?.[1] ?? ''
+  return new TextDecoder().decode(Uint8Array.from(atob(encoded), (c) => c.charCodeAt(0)))
+}
+
+const WORKING = 'Pokemon Yellow · Claude is working · S save · L load · M sound on · F speed ×2'
+
+test('in a terminal without pictures, the game plays in a window of its own', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on, clock, { env: { DISPLAY: ':0' } })
+  await startSession($)
+
+  await $.turn.start({ turnId: 't1', text: 'refactor auth' })
+  await clock.advance(2000)
+  await clock.settle()
+  // No pane: the window holds the game, and its title what's going on
+  expect(world.opens).toBe(0)
+  expect(world.control()).toMatch(/^play=1 .*view=window /)
+  expect(titleOf(world.control())).toBe('Pokemon Yellow · Click here to play · S save · L load · M sound on · F speed ×2')
+  world.engine.push('@focus 1')
+  await clock.settle()
+  expect(titleOf(world.control())).toBe(WORKING)
+
+  await finishTurn($)
+  await clock.advance(1000)
+  expect(titleOf(world.control())).toMatch(/^Pokemon Yellow · Claude's done · back in 2 · /)
+  await clock.advance(2000)
+  expect(world.control()).toMatch(/^play=0 .*view=none /)
+})
+
+test('keys typed in the window save to a slot, the title saying so', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on, clock, { env: { DISPLAY: ':0' } })
+  await startSession($)
+
+  await $.turn.start({ turnId: 't1', text: 'refactor auth' })
+  await clock.advance(2000)
+  world.engine.push('@focus 1')
+  world.engine.push('@key s')
+  await clock.settle()
+  expect(titleOf(world.control())).toMatch(/^Pokemon Yellow · Save to which slot\? 1–9/)
+  world.engine.push('@key 3')
+  await clock.settle()
+  expect(world.controls.some((line) => /cmds=\d+:save:3/.test(line))).toBe(true)
+  await clock.settle()
+  expect(titleOf(world.control())).toMatch(/^Pokemon Yellow · Saved to slot 3 · /)
+})
+
+test('closing the window pauses the game, and it stays closed for the turn', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on, clock, { env: { DISPLAY: ':0' } })
+  await startSession($)
+
+  await $.turn.start({ turnId: 't1', text: 'refactor auth' })
+  await clock.advance(2000)
+  world.engine.push('@closed')
+  await clock.settle()
+  expect(world.control()).toMatch(/^play=0 .*view=none /)
+  await $.tool.call({ tool: 'Bash', command: 'ls' } as never)
+  await clock.advance(3000)
+  expect(world.control()).toMatch(/^play=0 /)
+  await finishTurn($)
+
+  await $.turn.start({ turnId: 't2', text: 'again' })
+  await clock.advance(2000)
+  expect(world.control()).toMatch(/^play=1 .*view=window /)
+})
+
+test('where no window can open, the game plays in the pane', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on, clock, { env: { DISPLAY: ':0' } })
+  await startSession($)
+
+  await $.turn.start({ turnId: 't1', text: 'refactor auth' })
+  await clock.advance(2000)
+  world.engine.push('@nowindow no X11 (libX11.so.6) to draw a window with')
+  await clock.settle()
+  expect(world.opens).toBe(1)
+  await $.ui.mount(GAME)
+  expect(world.control()).toContain('view=cells:100x45')
+})

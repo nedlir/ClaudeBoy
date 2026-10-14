@@ -46,7 +46,8 @@ Game Boy and Game Boy Color games both work. It was built against Pokémon Yello
 
 ## Playing
 
-Click the game to give it the keys. Esc hands them back to the prompt.
+Click the game to give it the keys: the picture in the pane, or the game's
+window. In the pane, Esc hands the keys back to the prompt.
 
 | Game Boy | Key |
 | :- | :- |
@@ -63,8 +64,9 @@ Click the game to give it the keys. Esc hands them back to the prompt.
 | Sound on or off | M (off at first) |
 | Fast-forward ×2, ×4, then back | F |
 
-Terminals report key presses but not releases. A lone press is a short tap,
-and a held key counts as held for as long as its auto-repeat keeps coming. In
+The game's window sees keys as any game does. Terminals, though, report key
+presses but not releases, so in the pane a lone press is a short tap, and a
+held key counts as held for as long as its auto-repeat keeps coming. In
 games like Pokémon a tap takes one step and holding walks, with a short stop
 after the first step while the repeat starts. Shortening your keyboard's repeat
 delay in your desktop's settings shortens that stop.
@@ -91,26 +93,28 @@ somewhere else.
 One session at a time plays a given game. Another session that tries gets told
 so, and stays out for a minute.
 
-## The picture
+## Where the game shows
 
-Play in [kitty](https://sw.kovidgoyal.net/kitty/) or [Ghostty](https://ghostty.org).
-There the game is a real picture, rendered at exactly the size the terminal
-shows it, so every pixel stays sharp. It fills the pane at the Game Boy
-screen's shape, centered, and follows the pane and the terminal as they resize
-or change font. On Ubuntu:
+- **In kitty or Ghostty:** right in the pane beside the transcript, as a real
+  picture rendered at exactly the size the terminal shows it, so every pixel
+  is sharp. It fills the pane at the Game Boy screen's shape and follows the
+  pane and the terminal as they resize or change font.
+- **In any other terminal on a desktop** (GNOME Terminal, Konsole, Alacritty
+  and the rest): in a window of its own. Pixels are scaled by whole numbers
+  so they stay sharp, and the window resizes in whole steps of the screen.
+  It's kept above other windows while you play and hidden when Claude is
+  done or needs you. Its title says what's going on: Claude working, the
+  countdown, the slot picker. Click the window to play; GNOME doesn't hand
+  a new window the keyboard by itself. The window uses X11, or XWayland on
+  Wayland desktops, loaded only when needed.
+- **With no desktop**, as over SSH: in the pane, drawn with colored
+  half-block characters, two pixels per cell. Small panes look blocky.
 
-```
-sudo apt install kitty                  # or: sudo snap install ghostty --classic
-```
-
-Then run `claude` inside kitty or Ghostty, not inside tmux, which passes no
+`/claudeboy display auto|image|window|cells` overrides the choice, and
+`CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1` tells Claude Code to send pictures to a
+terminal it doesn't recognize. kitty is one install away on Ubuntu:
+`sudo apt install kitty`. Don't run `claude` inside tmux, which passes no
 pictures through.
-
-Other terminals, GNOME Terminal included, get the fallback: colored
-half-block characters, two pixels per cell. A pane 160 columns wide shows every
-pixel, but smaller panes look blocky. `/claudeboy display auto|cells|image`
-overrides the choice, and `CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1` tells Claude
-Code to send pictures to a terminal it doesn't recognize.
 
 ## Commands
 
@@ -138,7 +142,12 @@ in kitty and Ghostty into shared memory for an `Image`, rendered at the box's
 size in pixels. The mod paints it in place. The engine also reads the
 terminal's size, in pixels too where the terminal reports it, so the mod can
 refit the picture whenever the terminal changes. `hooks/gamepad.tsx` runs over
-the picture and turns key presses into held buttons. Sound, when on, is played through `aplay`, `pacat` or `ffplay`.
+the picture and turns key presses into held buttons. Other terminals get the
+engine's own window (`engine/window.c`). The engine loads `libX11` the first
+time the window opens and reads the buttons straight from the window. Keys
+that aren't the Game Boy's, like S, L, M and F, go up to the mod, which sends
+back the window's title. Sound, when on, is played through `aplay`, `pacat`
+or `ffplay`.
 
 The engine can also be run by hand:
 
