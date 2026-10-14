@@ -45,6 +45,11 @@ void gameWindowDraw(struct GameWindow* window, const uint32_t* frame);
 void gameWindowClose(struct GameWindow* window);
 // The drawer's width, and the width of the desktop it docks in, in pixels
 void gameWindowDrawer(struct GameWindow* window, int* width, int* workWidth);
+// The desktop's work area: what's left of the screen beside its panels
+void gameWindowWorkArea(struct GameWindow* window, int* x, int* y, int* width, int* height);
+// Lays the window over a box of the screen, in pixels, the game alone in it;
+// a width of 0 docks it as the drawer again
+void gameWindowPlace(struct GameWindow* window, int x, int y, int width, int height);
 // Called if the display goes away, before the process has to end
 void gameWindowOnLost(void (*callback)(void));
 

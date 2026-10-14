@@ -49,7 +49,9 @@ static const char USAGE[] =
 	"        play=1 keys=17 taps=3,0,0,0,0,0,0,0 view=cells:160x72 fps=30\n"
 	"        sound=1 speed=1 cmds=7:save:2,8:load:auto\n"
 	"      (view=image:<w>x<h> asks for pictures that size in pixels instead,\n"
-	"      view=window for a window of its own, titled by title=<base64>)\n"
+	"      view=window for a window of its own, titled by title=<base64>, laid\n"
+	"      over the terminal's cells overlay=<col>,<row>,<cols>,<rows> where the\n"
+	"      terminal fills the desktop, so it looks part of it)\n"
 	"      and writes one line on stdout per event:\n"
 	"        @ready <save-key> <color 0|1> <title>\n"
 	"        @term <cols> <rows> <x-pixels> <y-pixels>  the terminal's size\n"
@@ -62,6 +64,7 @@ static const char USAGE[] =
 	"        @key <letter or digit>          typed in the game's window\n"
 	"        @closed                         the person closed the window (Esc)\n"
 	"        @drawer <width> <desktop-width> the window's width, in pixels\n"
+	"        @cell <width> <height>          a terminal cell, in pixels, when told\n"
 	"        @focus 1|0                      the window got or lost the keys\n"
 	"        @nowindow <words>               no window can open here\n"
 	"        @log <words>, @error <words>\n"
@@ -147,6 +150,9 @@ struct Control {
 	bool isSoundOn;
 	int speed;
 	char title[256];
+	// A box of the terminal's cells to lay the window over: column, row,
+	// columns, rows; no columns, none
+	int overlay[4];
 };
 
 struct Command {
@@ -212,6 +218,9 @@ struct Engine {
 	bool isWindowDismissed;
 	uint32_t windowKeys;
 	char windowTitle[256];
+	// A terminal cell's size as last told to the mod
+	int cellWidth;
+	int cellHeight;
 
 	// The terminal Claude Code draws in, read for its size alone
 	int tty;
@@ -1129,6 +1138,8 @@ static void parseControl(char* line, struct Control* control, struct Command* co
 			control->isSoundOn = atoi(value) != 0;
 		} else if (!strcmp(token, "speed")) {
 			control->speed = clampInt(atoi(value), 1, 8);
+		} else if (!strcmp(token, "overlay")) {
+			sscanf(value, "%d,%d,%d,%d", &control->overlay[0], &control->overlay[1], &control->overlay[2], &control->overlay[3]);
 		} else if (!strcmp(token, "title")) {
 			base64Decode(value, control->title, sizeof(control->title));
 		} else if (!strcmp(token, "cmds")) {
@@ -1306,6 +1317,8 @@ static void watchTerminal(struct Engine* engine, bool isForced) {
 
 // --- The window ------------------------------------------------------------
 
+static void layWindow(struct Engine* engine);
+
 // Opens the window the first time the mod asks for one, shows it while the
 // game plays in it, and passes on what happened in it
 static void tendWindow(struct Engine* engine) {
@@ -1330,6 +1343,7 @@ static void tendWindow(struct Engine* engine) {
 	if (!engine->wanted.isPlaying) {
 		engine->isWindowDismissed = false;
 	}
+	layWindow(engine);
 	if (isWanted && engine->isPlaying && !engine->isWindowDismissed) {
 		gameWindowShow(engine->window);
 	} else {
@@ -1359,6 +1373,69 @@ static void tendWindow(struct Engine* engine) {
 	if (events.needsDrawing) {
 		engine->mustShow = true;
 	}
+}
+
+// Where the terminal's grid of cells is on the screen, when that can be told:
+// a terminal that fills the desktop's work area, as a maximized one does.
+// Its cells' size is the terminal's own where it says (kitty, Ghostty), or
+// what fits the work area, its scrollbar and header bar at most what those
+// usually take; its grid begins below a header bar of a GNOME-sized height.
+static bool terminalGrid(struct Engine* engine, int* cellWidth, int* cellHeight, int* left, int* top) {
+	const int columns = engine->terminal.ws_col;
+	const int rows = engine->terminal.ws_row;
+	if (!engine->window || columns <= 0 || rows <= 0) {
+		return false;
+	}
+	int x;
+	int y;
+	int width;
+	int height;
+	gameWindowWorkArea(engine->window, &x, &y, &width, &height);
+	if (engine->terminal.ws_xpixel && engine->terminal.ws_ypixel) {
+		*cellWidth = engine->terminal.ws_xpixel / columns;
+		*cellHeight = engine->terminal.ws_ypixel / rows;
+	} else {
+		*cellWidth = (width - 8) / columns;
+		*cellHeight = (height - 40) / rows;
+	}
+	const int spareWidth = width - columns * *cellWidth;
+	const int spareHeight = height - rows * *cellHeight;
+	if (*cellWidth < 5 || *cellHeight < 10 || spareWidth < 0 || spareWidth > 24 || spareHeight < 30 || spareHeight > 90) {
+		return false;
+	}
+	*left = x + 1;
+	*top = y + (spareHeight < 47 ? spareHeight : 47);
+	return true;
+}
+
+// Lays the window over the box of cells the mod names, when the terminal's
+// grid can be found on the screen; docks it as the drawer when not
+static void layWindow(struct Engine* engine) {
+	int cellWidth = 0;
+	int cellHeight = 0;
+	int left = 0;
+	int top = 0;
+	const bool hasGrid = terminalGrid(engine, &cellWidth, &cellHeight, &left, &top);
+	if (hasGrid && (cellWidth != engine->cellWidth || cellHeight != engine->cellHeight)) {
+		engine->cellWidth = cellWidth;
+		engine->cellHeight = cellHeight;
+		emit("@cell %d %d", cellWidth, cellHeight);
+	}
+	const int* box = engine->wanted.overlay;
+	if (!hasGrid || box[2] <= 0 || box[3] <= 0) {
+		gameWindowPlace(engine->window, 0, 0, 0, 0);
+		return;
+	}
+	// The game as large as fits the box at a whole multiple, in its middle
+	const int boxWidth = box[2] * cellWidth;
+	const int boxHeight = box[3] * cellHeight;
+	int scale = boxWidth / WINDOW_SCREEN_WIDTH < boxHeight / WINDOW_SCREEN_HEIGHT ? boxWidth / WINDOW_SCREEN_WIDTH
+	                                                                          : boxHeight / WINDOW_SCREEN_HEIGHT;
+	scale = scale < 1 ? 1 : scale;
+	const int width = WINDOW_SCREEN_WIDTH * scale;
+	const int height = WINDOW_SCREEN_HEIGHT * scale;
+	gameWindowPlace(engine->window, left + box[0] * cellWidth + (boxWidth - width) / 2,
+	                top + box[1] * cellHeight + (boxHeight - height) / 2, width, height);
 }
 
 // The desktop ended under the window: save what was played, then go

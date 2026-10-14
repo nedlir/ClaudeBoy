@@ -63,7 +63,7 @@ Esc hands you back to Claude.
 | Save to a slot | S, then 1–9 |
 | Load a slot | L, then 1–9 |
 | Sound on or off | M (off at first) |
-| Fast-forward ×2, ×4, then back | F |
+| Fast-forward ×2, ×4, ×8, then back | F |
 
 The game's window sees keys as any game does. Terminals, though, report key
 presses but not releases, so in the pane a lone press is a short tap, and a
@@ -101,16 +101,19 @@ so, and stays out for a minute.
   is sharp. It fills the pane at the Game Boy screen's shape and follows the
   pane and the terminal as they resize or change font.
 - **In any other terminal on a desktop** (GNOME Terminal, Konsole, Alacritty
-  and the rest): in a drawer that slides out at the right edge of the
-  screen, as tall as the desktop, with the game and its status under it.
-  Pixels are scaled by whole numbers so they stay sharp. At the same moment
-  Claude Code's side pane opens as wide as the drawer, so with a maximized
-  terminal the transcript moves left instead of being covered. The drawer
-  closes when Claude is done or needs you, and Esc closes it sooner. Click
-  it to play if it doesn't take the keyboard by itself. It uses X11, or
-  XWayland on Wayland desktops, loaded only when needed. Wayland doesn't tell
-  other apps where the terminal is, so the drawer docks to the screen's edge,
-  not the terminal's.
+  and the rest), ClaudeBoy draws the game itself on top of Claude's side pane.
+  When the terminal is maximized, it works out where the pane's picture
+  belongs on screen from the desktop's work area and the terminal's grid of
+  cells. It lays a borderless game surface exactly there, at a whole-number
+  scale, while Claude Code draws the pane's frame and status lines around
+  it, in the terminal's own font, as in kitty. It fades in and out with the
+  turn. When the terminal isn't maximized its place can't be known, because
+  Wayland doesn't say where windows are. Then the game slides out as a
+  drawer at the right edge of the screen, the pane opening at the same
+  width so the transcript moves aside. Either way Esc hands back early, and
+  you click the game to play if it doesn't take the keyboard by itself. It
+  uses X11, or XWayland on Wayland desktops, loaded only when needed. It
+  stays above other windows while it's out.
 - **With no desktop**, as over SSH: in the pane, drawn with colored
   half-block characters, two pixels per cell. Small panes look blocky.
 

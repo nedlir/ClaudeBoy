@@ -1,6 +1,9 @@
 // The game window, on X11 through libX11 and libXext loaded when it's first
-// opened. It's a drawer: no title bar, docked to the right edge of the desktop
-// and as tall as it, the game in the middle and what's going on under it. The few Xlib types it uses are declared here as Xlib.h has them, so
+// opened. Laid exactly over a box of the terminal (Claude's side pane) where
+// the engine can tell where that is, the game alone, so Claude draws the rest;
+// elsewhere a drawer: docked to the right edge of the desktop and as tall as
+// it, the game in the middle and what's going on under it. Either way it has
+// no title bar, and fades in and out. The few Xlib types it uses are declared here as Xlib.h has them, so
 // building needs no X11 headers; without X11, or a display, it doesn't open
 // and the engine says so.
 
@@ -14,6 +17,7 @@
 #include <string.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
+#include <time.h>
 #include <unistd.h>
 
 // --- Xlib, as Xlib.h and XShm.h declare it ---------------------------------
@@ -213,6 +217,7 @@ static struct {
 	int (*MapRaised)(Display*, Window);
 	int (*UnmapWindow)(Display*, Window);
 	int (*MoveWindow)(Display*, Window, int, int);
+	int (*MoveResizeWindow)(Display*, Window, int, int, unsigned, unsigned);
 	int (*StoreName)(Display*, Window, const char*);
 	Atom (*InternAtom)(Display*, const char*, Bool);
 	int (*ChangeProperty)(Display*, Window, Atom, Atom, int, int, const unsigned char*, int);
@@ -277,6 +282,7 @@ static bool loadX11(char* error, size_t errorSize) {
 		FROM(x11, MapRaised, true),
 		FROM(x11, UnmapWindow, true),
 		FROM(x11, MoveWindow, true),
+		FROM(x11, MoveResizeWindow, true),
 		FROM(x11, StoreName, true),
 		FROM(x11, InternAtom, true),
 		FROM(x11, ChangeProperty, true),
@@ -354,6 +360,8 @@ struct GameWindow {
 	// two lines of status it shows under the game, in Latin-1 for X's fonts
 	int dockX;
 	int dockY;
+	int dockWidth;
+	int dockHeight;
 	int workWidth;
 	Atom wmStates[3];
 	GC textGc;
@@ -362,7 +370,55 @@ struct GameWindow {
 	int ascent;
 	int charWidth;
 	char lines[2][192];
+
+	// The desktop's work area, and the box of it the window is laid over
+	// instead of docking, when it is
+	int workX;
+	int workY;
+	int workHeight;
+	bool isOverlay;
+	int overlayX;
+	int overlayY;
+	int overlayWidth;
+	int overlayHeight;
+
+	// Fading in (1) or out (-1) since `fadeStartMs`, or still (0)
+	int fade;
+	long long fadeStartMs;
+	Atom opacity;
 };
+
+#define FADE_MS 160
+// How far the drawer's game slides in from as it fades in
+#define SLIDE_PX 48
+
+static long long nowMs(void) {
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	return (long long) now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+// The window's place: laid over its box, or docked
+static void targetRect(const struct GameWindow* window, int* x, int* y, int* width, int* height) {
+	if (window->isOverlay) {
+		*x = window->overlayX;
+		*y = window->overlayY;
+		*width = window->overlayWidth;
+		*height = window->overlayHeight;
+	} else {
+		*x = window->dockX;
+		*y = window->dockY;
+		*width = window->dockWidth;
+		*height = window->dockHeight;
+	}
+}
+
+static void setOpacity(struct GameWindow* window, double alpha) {
+	alpha = alpha < 0 ? 0 : alpha > 1 ? 1 : alpha;
+	const unsigned long value = (unsigned long) (alpha * 0xFFFFFFFFu);
+	X.ChangeProperty(window->display, window->window, window->opacity, XA_CARDINAL, 32, PropModeReplace,
+	                 (const unsigned char*) &value, 1);
+}
 
 #define DRAWER_MARGIN 16
 #define DRAWER_COLOR 0x1C1C22u
@@ -370,7 +426,7 @@ struct GameWindow {
 #define DIM_TEXT_COLOR 0x8C8C98u
 
 static int textArea(const struct GameWindow* window) {
-	return window->hasFont ? 2 * window->lineHeight + 14 : 0;
+	return window->hasFont && !window->isOverlay ? 2 * window->lineHeight + 14 : 0;
 }
 
 static unsigned long pixelOf(const struct GameWindow* window, uint32_t rgb) {
@@ -518,17 +574,52 @@ static void dock(struct GameWindow* window, int scale) {
 	window->height = areaHeight > 0 ? areaHeight : WINDOW_SCREEN_HEIGHT * scale + 2 * DRAWER_MARGIN + textArea(window);
 	window->dockX = (int) area[0] + areaWidth - window->width;
 	window->dockY = (int) area[1];
+	window->dockWidth = window->width;
+	window->dockHeight = window->height;
+	window->workX = (int) area[0];
+	window->workY = (int) area[1];
 	window->workWidth = areaWidth;
+	window->workHeight = areaHeight;
 }
 
 static void setDockHints(struct GameWindow* window) {
 	XSizeHints hints = { 0 };
 	hints.flags = USPosition | PPosition | USSize | PSize | PMinSize | PMaxSize;
-	hints.x = window->dockX;
-	hints.y = window->dockY;
-	hints.width = hints.minWidth = hints.maxWidth = window->width;
-	hints.height = hints.minHeight = hints.maxHeight = window->height;
+	targetRect(window, &hints.x, &hints.y, &hints.width, &hints.height);
+	hints.minWidth = hints.maxWidth = hints.width;
+	hints.minHeight = hints.maxHeight = hints.height;
 	X.SetWMNormalHints(window->display, window->window, &hints);
+}
+
+void gameWindowWorkArea(struct GameWindow* window, int* x, int* y, int* width, int* height) {
+	*x = window->workX;
+	*y = window->workY;
+	*width = window->workWidth;
+	*height = window->workHeight;
+}
+
+void gameWindowPlace(struct GameWindow* window, int x, int y, int width, int height) {
+	const bool isOverlay = width > 0 && height > 0;
+	if (isOverlay == window->isOverlay && (!isOverlay || (x == window->overlayX && y == window->overlayY &&
+	                                                     width == window->overlayWidth && height == window->overlayHeight))) {
+		return;
+	}
+	window->isOverlay = isOverlay;
+	window->overlayX = x;
+	window->overlayY = y;
+	window->overlayWidth = width;
+	window->overlayHeight = height;
+	setDockHints(window);
+	int targetX;
+	int targetY;
+	int targetWidth;
+	int targetHeight;
+	targetRect(window, &targetX, &targetY, &targetWidth, &targetHeight);
+	X.MoveResizeWindow(window->display, window->window, targetX, targetY, (unsigned) targetWidth, (unsigned) targetHeight);
+	window->width = targetWidth;
+	window->height = targetHeight;
+	window->needsDrawing = true;
+	X.Flush(window->display);
 }
 
 // X's own fonts: the larger where the server has it
@@ -615,6 +706,7 @@ struct GameWindow* gameWindowOpen(int scale, char* error, size_t errorSize) {
 	window->utf8String = X.InternAtom(display, "UTF8_STRING", 0);
 	window->wmIcon = X.InternAtom(display, "_NET_WM_ICON", 0);
 	window->wmPid = X.InternAtom(display, "_NET_WM_PID", 0);
+	window->opacity = X.InternAtom(display, "_NET_WM_WINDOW_OPACITY", 0);
 
 	// A drawer: docked where it's told, its own size, with no title bar,
 	// above the other windows and out of the taskbar
@@ -647,28 +739,64 @@ struct GameWindow* gameWindowOpen(int scale, char* error, size_t errorSize) {
 
 void gameWindowShow(struct GameWindow* window) {
 	if (window->isShown) {
+		// Fading out: fade back in from as far as it got
+		if (window->fade < 0) {
+			const long long left = FADE_MS - (nowMs() - window->fadeStartMs);
+			window->fade = 1;
+			window->fadeStartMs = nowMs() - (left > 0 ? left : 0);
+		}
 		return;
 	}
-	// Each time at the right edge, above the other windows
+	// Each time in its place, above the other windows, fading in
 	X.ChangeProperty(window->display, window->window, window->wmState, XA_ATOM, 32, PropModeReplace,
 	                 (const unsigned char*) window->wmStates, 3);
 	setDockHints(window);
-	X.MoveWindow(window->display, window->window, window->dockX, window->dockY);
+	int x;
+	int y;
+	int width;
+	int height;
+	targetRect(window, &x, &y, &width, &height);
+	X.MoveResizeWindow(window->display, window->window, x, y, (unsigned) width, (unsigned) height);
+	window->width = width;
+	window->height = height;
+	setOpacity(window, 0);
 	X.MapRaised(window->display, window->window);
 	X.Flush(window->display);
 	window->isShown = true;
 	window->needsDrawing = true;
+	window->fade = 1;
+	window->fadeStartMs = nowMs();
 }
 
+// Fades out, then unmaps; the keys let go at once
 void gameWindowHide(struct GameWindow* window) {
-	if (!window->isShown) {
-		return;
-	}
-	X.UnmapWindow(window->display, window->window);
-	X.Flush(window->display);
-	window->isShown = false;
 	window->keys = 0;
 	memset(window->pressed, 0, sizeof(window->pressed));
+	if (!window->isShown || window->fade < 0) {
+		return;
+	}
+	window->fade = -1;
+	window->fadeStartMs = nowMs();
+}
+
+// Steps a fade along: called with every pump
+static void animate(struct GameWindow* window) {
+	if (!window->fade) {
+		return;
+	}
+	const double t = (double) (nowMs() - window->fadeStartMs) / FADE_MS;
+	if (t >= 1) {
+		if (window->fade < 0) {
+			X.UnmapWindow(window->display, window->window);
+			window->isShown = false;
+		}
+		setOpacity(window, 1);
+		window->fade = 0;
+	} else {
+		setOpacity(window, window->fade > 0 ? t : 1 - t);
+	}
+	window->needsDrawing = true;
+	X.Flush(window->display);
 }
 
 void gameWindowSetTitle(struct GameWindow* window, const char* utf8) {
@@ -719,6 +847,7 @@ static int buttonOf(KeySym symbol) {
 }
 
 void gameWindowPump(struct GameWindow* window, struct GameWindowEvents* events) {
+	animate(window);
 	memset(events, 0, sizeof(*events));
 	events->focus = -1;
 	while (X.Pending(window->display)) {
@@ -874,15 +1003,24 @@ void gameWindowDraw(struct GameWindow* window, const uint32_t* frame) {
 	const int height = window->height;
 	// The game and the status under it, together in the middle of the drawer
 	const int text = textArea(window);
-	const int roomWidth = (width - 2 * DRAWER_MARGIN) / WINDOW_SCREEN_WIDTH;
-	const int roomHeight = (height - 2 * DRAWER_MARGIN - text) / WINDOW_SCREEN_HEIGHT;
+	// Laid over its box, the window is the game's own size: no margin
+	const int margin = window->isOverlay ? 0 : DRAWER_MARGIN;
+	const int roomWidth = (width - 2 * margin) / WINDOW_SCREEN_WIDTH;
+	const int roomHeight = (height - 2 * margin - text) / WINDOW_SCREEN_HEIGHT;
 	int scale = roomWidth < roomHeight ? roomWidth : roomHeight;
 	if (scale < 1) {
 		scale = 1;
 	}
 	const int pictureWidth = WINDOW_SCREEN_WIDTH * scale;
 	const int pictureHeight = WINDOW_SCREEN_HEIGHT * scale;
-	const int left = (width - pictureWidth) / 2;
+	// The drawer's game slides in a little as it fades in
+	int slide = 0;
+	if (window->fade > 0 && !window->isOverlay) {
+		double t = (double) (nowMs() - window->fadeStartMs) / FADE_MS;
+		t = t > 1 ? 1 : t;
+		slide = (int) ((1 - t) * (1 - t) * SLIDE_PX);
+	}
+	const int left = (width - pictureWidth) / 2 + slide;
 	const int top = (height - pictureHeight - text) / 2;
 	const uint32_t border = (uint32_t) pixelOf(window, DRAWER_COLOR);
 	char* data = window->image->data;
@@ -924,7 +1062,7 @@ void gameWindowDraw(struct GameWindow* window, const uint32_t* frame) {
 	} else {
 		X.PutImage(window->display, window->window, window->gc, window->image, 0, 0, 0, 0, (unsigned) width, (unsigned) height);
 	}
-	if (window->hasFont) {
+	if (window->hasFont && !window->isOverlay) {
 		const int most = (width - 2 * DRAWER_MARGIN) / window->charWidth;
 		for (int line = 0; line < 2; line++) {
 			const int length = (int) strlen(window->lines[line]);

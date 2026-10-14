@@ -39,7 +39,7 @@ const SCREEN_HEIGHT = 144
 const DEFAULT_CELL = { width: 10, height: 20 }
 const MAX_IMAGE_CELLS = 255
 // F steps through these speeds
-const SPEEDS = [1, 2, 4]
+const SPEEDS = [1, 2, 4, 8]
 // Image blits refused in a row before the pane falls back to cells
 const IMAGE_FAILURES_BEFORE_CELLS = 10
 
@@ -61,7 +61,7 @@ const HELP = [
   '  /claudeboy sound on|off',
   '  /claudeboy display auto|cells|image|window',
   '',
-  'In the game: ' + CONTROLS + '. S saves to a slot, L loads one, M turns the sound on or off, F fast-forwards ×2, ×4, then back.',
+  'In the game: ' + CONTROLS + '. S saves to a slot, L loads one, M turns the sound on or off, F fast-forwards ×2, ×4, ×8, then back.',
 ].join('\n')
 
 type Phase = 'idle' | 'waiting' | 'offered' | 'playing' | 'countdown'
@@ -126,7 +126,7 @@ let busyUntil = 0
 let awayTimer: Timer | null = null
 let commands: Command[] = []
 let nextCommandId = 1
-let wanted = { isPlaying: false, keys: 0, taps: [0, 0, 0, 0, 0, 0, 0, 0], view: 'none', speed: 1 }
+let wanted = { isPlaying: false, keys: 0, taps: [0, 0, 0, 0, 0, 0, 0, 0], view: 'none', speed: 1, overlay: 'none' }
 let controlWrite: Promise<void> | null = null
 let isControlDirty = false
 // Set when play pauses, so the save that follows can be told
@@ -464,11 +464,17 @@ function onEngineLine($: Dollar, line: string) {
     case '@term': {
       // Resized, or another font: the picture is laid out anew
       const [columns = 0, rows = 0, width = 0, height = 0] = words.map(Number)
-      cell = columns > 0 && rows > 0 && width > 0 && height > 0 ? { width: width / columns, height: height / rows } : { width: 0, height: 0 }
+      // A terminal that doesn't say its cells' size keeps the engine's estimate
+      if (columns > 0 && rows > 0 && width > 0 && height > 0) cell = { width: width / columns, height: height / rows }
       terminalColumns = columns
       redraw($)
       break
     }
+    case '@cell':
+      // Where the terminal fills the desktop, the engine tells its cells' size
+      cell = { width: Number(words[0]) || 0, height: Number(words[1]) || 0 }
+      redraw($)
+      break
     case '@drawer':
       drawer = { width: Number(words[0]) || 0, workWidth: Number(words[1]) || 0 }
       // Sized now the drawer is: the pane makes room to match
@@ -555,7 +561,10 @@ function controlLine(): string {
     'sound=' + (isSoundOn ? 1 : 0),
     'speed=' + wanted.speed,
   ]
-  if (wanted.view === 'window') fields.push('title=' + base64(new TextEncoder().encode(windowTitle())))
+  if (wanted.view === 'window') {
+    fields.push('overlay=' + wanted.overlay)
+    fields.push('title=' + base64(new TextEncoder().encode(windowTitle())))
+  }
   if (commands.length > 0) {
     fields.push('cmds=' + commands.map((command) => command.id + ':' + command.name + (command.arg ? ':' + command.arg : '')).join(','))
   }
@@ -621,6 +630,7 @@ async function stopEngine($: Dollar) {
 // The picture
 
 function forgetPicture() {
+  wanted.overlay = 'none'
   size = null
   drawnSize = null
   cells = null
@@ -1163,7 +1173,7 @@ export const register: Register = (on) => {
             of its own in other terminals. You're handed back when Claude is done or needs you, and the game is saved
             each time.
           </Text>
-          <Text>{CONTROLS}. S saves to a slot, L loads one, M turns the sound on or off, F fast-forwards ×2, ×4, then back.</Text>
+          <Text>{CONTROLS}. S saves to a slot, L loads one, M turns the sound on or off, F fast-forwards ×2, ×4, ×8, then back.</Text>
           {welcomeStatus ? <Text color={welcomeStatus.startsWith('Ready') ? 'green' : undefined}>{welcomeStatus}</Text> : null}
           <Text dimColor>/claudeboy play opens it now · /claudeboy help lists the rest · /claudeboy off turns it off</Text>
           <Button
@@ -1183,15 +1193,31 @@ export const register: Register = (on) => {
 
     const mode = pictureMode()
     if (mode === 'window') {
+      // The engine lays the game over this pane's picture box, so it looks
+      // part of the terminal; the pane draws the frame and the status. Where
+      // it can't (another layout, a terminal not filling the desktop) the
+      // game is in the drawer at the screen's edge.
+      const room = layout(e.props.bodyColumns, e.props.scroll.bodyRows, 'image')
+      const overlay =
+        e.props.placement === 'dock' && terminalColumns > 0
+          ? [terminalColumns - e.props.bodyColumns + room.left, 1, room.columns, room.rows].join(',')
+          : 'none'
+      if (overlay !== wanted.overlay) {
+        wanted.overlay = overlay
+        scheduleControl($)
+      }
       const { text, isStrong } = statusLine()
       return (
         <Box flexDirection="column">
-          <Text bold={isStrong} wrap="truncate-end">
-            {text === 'Click here to play' ? 'Click the drawer to play' : text}
-          </Text>
-          <Text dimColor wrap="truncate-end">
-            {(game?.title ?? 'The game') + ' is in the drawer → · ' + hintLine()}
-          </Text>
+          {overlay !== 'none' ? <Box height={room.rows} /> : <Text dimColor>{(game?.title ?? 'The game') + ' is in the drawer →'}</Text>}
+          <Box marginLeft={overlay !== 'none' ? room.left : 0} flexDirection="column">
+            <Text bold={isStrong} wrap="truncate-end">
+              {text === 'Click here to play' ? 'Click the game to play' : text}
+            </Text>
+            <Text dimColor wrap="truncate-end">
+              {hintLine()}
+            </Text>
+          </Box>
         </Box>
       )
     }

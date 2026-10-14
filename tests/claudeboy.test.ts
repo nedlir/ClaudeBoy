@@ -535,7 +535,7 @@ test('stays out for a minute when another session is playing the game', SLOW, as
   expect(world.opens).toBe(2)
 })
 
-test('F steps the speed up to ×2, then ×4, then back to ×1', SLOW, async ($, on) => {
+test('F steps the speed up to ×2, ×4 and ×8, then back to ×1', SLOW, async ($, on) => {
   const clock = mock.clock(on)
   const world = stubClaudeCode(on, clock)
   await startSession($)
@@ -546,12 +546,12 @@ test('F steps the speed up to ×2, then ×4, then back to ×1', SLOW, async ($, 
   world.engine.push('@cells 1 100 45')
   await clock.settle()
   const speeds: string[] = []
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < 4; i++) {
     await game.key({ key: 'f', in: 'pad' })
     await game.advance(16)
     speeds.push(/ speed=(\d+)/.exec(world.control())?.[1] ?? '?')
   }
-  expect(speeds).toEqual(['2', '4', '1'])
+  expect(speeds).toEqual(['2', '4', '8', '1'])
 })
 
 // The window's title as the engine reads it out of the control line
@@ -656,4 +656,22 @@ test('the pane opens as wide as the drawer, so the transcript moves aside', SLOW
   await clock.settle()
   expect(world.control()).toMatch(/^play=0 /)
   expect(world.closes).toBeGreaterThan(0)
+})
+
+test('in a maximized terminal the game is laid over the pane\'s picture box', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on, clock, { env: { DISPLAY: ':0' } })
+  await startSession($)
+
+  await $.turn.start({ turnId: 't1', text: 'refactor auth' })
+  await clock.advance(2000)
+  // 120 columns of 10 by 22 pixels, the pane's body the rightmost 51
+  world.engine.push('@term 120 32 0 0')
+  world.engine.push('@cell 10 22')
+  await clock.settle()
+  const game = await $.ui.mount({ ...GAME, props: { ...GAME.props, bodyColumns: 51, scroll: { offset: 0, bodyRows: 25 } } })
+  // 51 columns hold the screen in 21 rows of 22 pixels; the box starts at
+  // column 69, below the pane's top row
+  expect(world.control()).toContain(' overlay=69,1,51,21 ')
+  expect(await game.find({ text: /Click the game to play/ })).toBeDefined()
 })
