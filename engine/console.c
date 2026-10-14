@@ -58,68 +58,39 @@ struct Layout {
 	int slot[6][4];
 };
 
-// Upright, as the first Game Boy
-static const struct Layout TALL = {
-	.width = 216,
-	.height = 316,
-	.bodyRadius = { 10, 10, 36, 10 },
-	.bezel = { 12, 16, 192, 180 },
-	.bezelRadius = { 6, 6, 24, 6 },
-	.screenX = 28,
-	.screenY = 36,
-	.led = { 20, 76 },
-	.stripe = { 25, 108, 113, 160 },
-	.stripeLeft = 20,
-	.stripeRight = 196,
-	.logo = { 22, 210 },
-	.pad = { 50, 252 },
-	.b = { 150, 262 },
-	.a = { 184, 244 },
-	.buttonRadius = 11,
-	.pills = { { 68, 297, 80, 291 }, { 98, 297, 110, 291 }, { 128, 297, 140, 291 } },
-	.pillLabels = { { 62, 303 }, { 94, 303 }, { 130, 303 } },
-	.groove = 7,
-	.slots = 6,
-	.slot = { { 168, 306, 178, 286 }, { 175, 306, 185, 286 }, { 182, 306, 192, 286 }, { 189, 306, 199, 286 },
-	          { 196, 304, 205, 286 }, { 203, 298, 210, 286 } },
-};
-
-// Wide, the controls at either side of the screen: for a pane that's short
+// The console: wide, the controls at either side of the screen
 static const struct Layout WIDE = {
-	.width = 274,
+	.width = 272,
 	.height = 198,
 	.bodyRadius = { 30, 30, 30, 30 },
-	.bezel = { 51, 8, 172, 166 },
+	.bezel = { 48, 8, 176, 166 },
 	.bezelRadius = { 6, 6, 6, 6 },
-	.screenX = 57,
+	.screenX = 56,
 	.screenY = 22,
-	.led = { 26, 30 },
-	.stripe = { 14, 111, 115, 162 },
-	.stripeLeft = 57,
-	.stripeRight = 217,
-	.logo = { 103, 186 },
-	.pad = { 26, 92 },
-	.b = { 238, 102 },
-	.a = { 259, 86 },
-	.buttonRadius = 10,
-	.pills = { { 9, 142, 18, 136 }, { 34, 142, 43, 136 }, { 243, 142, 253, 136 } },
-	.pillLabels = { { 2, 148 }, { 29, 148 }, { 245, 148 } },
+	.led = { 24, 30 },
+	.stripe = { 14, 110, 114, 162 },
+	.stripeLeft = 56,
+	.stripeRight = 216,
+	.logo = { 99, 186 },
+	.pad = { 24, 84 },
+	.b = { 237, 100 },
+	.a = { 258, 82 },
+	.buttonRadius = 9,
+	.pills = { { 19, 130, 29, 124 }, { 19, 152, 29, 146 }, { 243, 152, 253, 146 } },
+	.pillLabels = { { 12, 134 }, { 14, 156 }, { 245, 156 } },
 	.groove = -1,
 	.slots = 4,
-	.slot = { { 232, 186, 240, 168 }, { 239, 186, 247, 168 }, { 246, 184, 254, 168 }, { 253, 178, 260, 168 } },
+	.slot = { { 222, 188, 229, 172 }, { 228, 188, 235, 172 }, { 234, 186, 241, 172 }, { 240, 182, 246, 172 } },
 };
 
 static const struct Layout* layoutOf(struct ConsoleShape shape) {
-	return shape.isWide ? &WIDE : &TALL;
+	(void) shape;
+	return &WIDE;
 }
 
 int consoleFit(int width, int height, struct ConsoleShape* shape) {
-	const int tall = width / TALL.width < height / TALL.height ? width / TALL.width : height / TALL.height;
-	const int wide = width / WIDE.width < height / WIDE.height ? width / WIDE.width : height / WIDE.height;
-	// Upright, as a Game Boy is, unless wide shows the screen larger
-	const struct Layout* layout = wide > tall ? &WIDE : &TALL;
-	*shape = (struct ConsoleShape) { layout == &WIDE, layout->width, layout->height };
-	const int scale = wide > tall ? wide : tall;
+	*shape = (struct ConsoleShape) { true, WIDE.width, WIDE.height };
+	const int scale = width / WIDE.width < height / WIDE.height ? width / WIDE.width : height / WIDE.height;
 	return scale < 1 ? 1 : scale;
 }
 
@@ -444,7 +415,7 @@ void consoleDraw(struct ConsoleShape shape, const uint32_t* screen, uint32_t key
 	// A and B in their slanted recess
 	for (int y = layout->a[1] - 18; y <= layout->b[1] + 18; y++) {
 		for (int x = layout->b[0] - 18; x <= layout->a[0] + 18; x++) {
-			if (inCapsule(x, y, layout->b[0], layout->b[1], layout->a[0], layout->a[1], layout->buttonRadius + 3)) {
+			if (inCapsule(x, y, layout->b[0], layout->b[1], layout->a[0], layout->a[1], layout->buttonRadius + 4)) {
 				put(&canvas, x, y, RECESS);
 			}
 		}

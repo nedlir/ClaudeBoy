@@ -48,6 +48,7 @@ static struct {
 } A;
 
 static atomic_int state = FRONTMOST_UNKNOWN;
+static atomic_bool isShowNoted = false;
 static char marker[128];
 
 static void sleepMs(int ms) {
@@ -190,6 +191,76 @@ static AtspiAccessible* findOurs(void) {
 	return found;
 }
 
+// The terminal in the shown tab of the active window, if a terminal's window
+// is the active one: a reference the caller lets go of
+static AtspiAccessible* findShownTerminal(AtspiAccessible* node, int depth) {
+	if (depth > 12) {
+		return NULL;
+	}
+	const int role = roleOf(node);
+	if (role == ROLE_TERMINAL) {
+		return node;
+	}
+	if (role < 0 || (role == ROLE_PAGE_TAB && !hasState(node, STATE_SELECTED))) {
+		return NULL;
+	}
+	GError* error = NULL;
+	const int count = A.childCount(node, &error);
+	if (failed(error)) {
+		return NULL;
+	}
+	for (int i = 0; i < count && i < 64; i++) {
+		AtspiAccessible* child = A.childAt(node, i, &error);
+		if (failed(error) || !child) {
+			error = NULL;
+			continue;
+		}
+		AtspiAccessible* found = findShownTerminal(child, depth + 1);
+		if (found != child) {
+			A.unref(child);
+		}
+		if (found) {
+			return found;
+		}
+	}
+	return NULL;
+}
+
+static AtspiAccessible* findActiveTerminal(void) {
+	AtspiAccessible* desktop = A.getDesktop(0);
+	if (!desktop) {
+		return NULL;
+	}
+	GError* error = NULL;
+	const int apps = A.childCount(desktop, &error);
+	AtspiAccessible* found = NULL;
+	for (int i = 0; !failed(error) && i < apps && !found; i++) {
+		AtspiAccessible* app = A.childAt(desktop, i, &error);
+		if (failed(error) || !app) {
+			error = NULL;
+			continue;
+		}
+		const int windows = A.childCount(app, &error);
+		for (int j = 0; !failed(error) && j < windows && j < 32 && !found; j++) {
+			AtspiAccessible* window = A.childAt(app, j, &error);
+			if (failed(error) || !window) {
+				error = NULL;
+				continue;
+			}
+			if (roleOf(window) == ROLE_FRAME && hasState(window, STATE_ACTIVE)) {
+				found = findShownTerminal(window, 0);
+			}
+			if (found != window) {
+				A.unref(window);
+			}
+		}
+		error = NULL;
+		A.unref(app);
+	}
+	A.unref(desktop);
+	return found;
+}
+
 // In front: the window holding the terminal is the active one, and the tab
 // holding it, if it's in one, the tab shown. -1 when the terminal is gone.
 static int inFront(AtspiAccessible* terminal) {
@@ -228,20 +299,43 @@ static void* watch(void* unused) {
 	if (!load()) {
 		return NULL;
 	}
+	// This session's terminal, and whether the marker said so; until it's
+	// found, the terminal in front as of the last look, which is this
+	// session's when the game first shows: the person just started Claude
+	// working there
 	AtspiAccessible* terminal = NULL;
+	bool isMarked = false;
+	AtspiAccessible* lastInFront = NULL;
 	for (int round = 0;; round++) {
 		// Messages from the bus the calls didn't take, handled so they don't pile up
 		for (int i = 0; i < 64 && A.iterate(NULL, 0); i++) {
 		}
-		// Looked for again every second until found, and checked now and then:
-		// the pane is redrawn, so the marker could go from a terminal that shows
-		// something else now
-		if (terminal && round % 20 == 0 && !showsMarker(terminal)) {
-			A.unref(terminal);
-			terminal = NULL;
+		// The marker settles it: looked for while it hasn't, and checked now
+		// and then, in case the pane moved to another terminal. A terminal
+		// once found is kept while the marker shows nowhere else.
+		if (isMarked ? round % 20 == 0 && !showsMarker(terminal) : round % 7 == 0) {
+			AtspiAccessible* marked = findOurs();
+			if (marked) {
+				if (terminal) {
+					A.unref(terminal);
+				}
+				terminal = marked;
+				isMarked = true;
+			}
 		}
-		if (!terminal && round % 7 == 0) {
-			terminal = findOurs();
+		if (!terminal) {
+			if (atomic_exchange(&isShowNoted, false) && lastInFront) {
+				terminal = lastInFront;
+				lastInFront = NULL;
+			} else {
+				AtspiAccessible* inFront = findActiveTerminal();
+				if (inFront) {
+					if (lastInFront) {
+						A.unref(lastInFront);
+					}
+					lastInFront = inFront;
+				}
+			}
 		}
 		if (!terminal) {
 			atomic_store(&state, FRONTMOST_UNKNOWN);
@@ -250,8 +344,10 @@ static void* watch(void* unused) {
 		}
 		const int front = inFront(terminal);
 		if (front < 0) {
+			// Gone: its tab closed
 			A.unref(terminal);
 			terminal = NULL;
+			isMarked = false;
 			atomic_store(&state, FRONTMOST_UNKNOWN);
 		} else {
 			atomic_store(&state, front ? FRONTMOST_IN_FRONT : FRONTMOST_BEHIND);
@@ -274,6 +370,10 @@ void frontmostStart(const char* text) {
 	pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED);
 	pthread_create(&thread, &attributes, watch, NULL);
 	pthread_attr_destroy(&attributes);
+}
+
+void frontmostNoteShown(void) {
+	atomic_store(&isShowNoted, true);
 }
 
 enum Frontmost frontmostState(void) {

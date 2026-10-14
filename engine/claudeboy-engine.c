@@ -1598,6 +1598,9 @@ static void tendWindow(struct Engine* engine) {
 	}
 	const bool isTerminalBehind = engine->behindSinceNs && monotonicNs() - engine->behindSinceNs > 400000000LL;
 	if (isWanted && engine->isPlaying && !isTerminalBehind) {
+		if (!engine->hasShownSincePlay) {
+			frontmostNoteShown();
+		}
 		gameWindowShow(engine->window, !engine->hasShownSincePlay);
 		engine->hasShownSincePlay = true;
 	} else {

@@ -115,10 +115,9 @@ rest of the turn.
   screen from the desktop's work area and the terminal's grid of cells. It
   lays the console over the pane's body, cut to its rounded outline, while
   Claude Code draws the pane's frame and status lines in the terminal's own
-  font. The console is upright where the pane is tall enough and wide where
-  it's short, whichever shows the game larger at a whole-number scale, so
-  every pixel stays sharp. The pane asks for the width the wide console needs
-  at twice its size, though a width you've dragged it to wins. When the
+  font. It's drawn at a whole-number scale, so every pixel stays sharp. The
+  pane asks for the width the console needs at twice its size, though a
+  width you've dragged it to wins. When the
   terminal isn't maximized its place can't be known, because Wayland doesn't
   say where windows are. Then the console slides out in a drawer at the right
   edge of the screen, and the pane opens at the same width so the transcript

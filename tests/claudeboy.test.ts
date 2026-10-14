@@ -733,7 +733,7 @@ test('in a maximized terminal the console is laid over the pane, made wide enoug
   world.engine.push('@drawer 464 1214')
   world.engine.push('@cell 10 22')
   await clock.settle()
-  // The pane asks for room for the wide console at twice its 274 pixels
+  // The pane asks for room for the wide console at twice its 272 pixels
   expect(world.openColumns.at(-1)).toBe(56)
   const game = await $.ui.mount({ ...GAME, props: { ...GAME.props, bodyColumns: 56, scroll: { offset: 0, bodyRows: 25 } } })
   // The box: the pane's body from column 64, below its top row, all but the

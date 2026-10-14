@@ -34,7 +34,7 @@ const STATUS_ROWS = 2
 const SCREEN_WIDTH = 160
 const SCREEN_HEIGHT = 144
 // The engine's wide console, in its own pixels (engine/console.c)
-const WIDE_CONSOLE_WIDTH = 274
+const WIDE_CONSOLE_WIDTH = 272
 // A cell's size in pixels until the terminal says: most fonts are about
 // twice as tall as wide
 const DEFAULT_CELL = { width: 10, height: 20 }

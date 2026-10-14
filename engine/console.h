@@ -1,6 +1,6 @@
 // The console drawn around the game: a Game Boy in Claude's orange, in pixel
-// art, its buttons lit and pressed in as they're held. Two shapes: upright,
-// for tall room, and wide with the controls at the sides, for wide room.
+// art, wide with the controls at the sides, its buttons lit and pressed in as
+// they're held.
 
 #ifndef CLAUDEBOY_CONSOLE_H
 #define CLAUDEBOY_CONSOLE_H
@@ -10,8 +10,8 @@
 
 #define CONSOLE_SCREEN_WIDTH 160
 #define CONSOLE_SCREEN_HEIGHT 144
-#define CONSOLE_MAX_WIDTH 274
-#define CONSOLE_MAX_HEIGHT 316
+#define CONSOLE_MAX_WIDTH 272
+#define CONSOLE_MAX_HEIGHT 198
 
 // Hit by a point: the speed button, past the Game Boy's eight
 #define CONSOLE_SPEED 8
@@ -22,8 +22,8 @@ struct ConsoleShape {
 	int height;
 };
 
-// The shape that shows the screen largest in a `width` by `height` box at a
-// whole multiple of its size, and that multiple (at least 1)
+// The console's shape, and the largest whole multiple of its size that fits
+// a `width` by `height` box (at least 1)
 int consoleFit(int width, int height, struct ConsoleShape* shape);
 // Where the screen is in the console, in its own pixels
 void consoleScreen(struct ConsoleShape shape, int* x, int* y);
