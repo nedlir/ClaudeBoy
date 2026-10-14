@@ -1147,6 +1147,8 @@ export const register: Register = (on) => {
     if (e.agentId) return next(e)
     isTurnRunning = true
     isDismissed = false
+    // On or off as /claudeboy last left it in any session
+    isOn = (await $.store.get('isOn')) === true
     if (isWelcomeOpen) {
       isWelcomeOpen = false
       await $.ui.close({ id: PANE })

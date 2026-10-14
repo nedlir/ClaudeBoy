@@ -58,6 +58,8 @@ type World = {
   engine: ReturnType<typeof channel>
   // The newest line the mod wrote to the engine's control file
   control: () => string
+  // What the mod keeps across sessions, as every session sees it
+  store: Record<string, unknown>
 }
 
 // Answers everything the mod asks of Claude Code, and plays the engine: it
@@ -75,6 +77,7 @@ function stubClaudeCode(
   } = {},
 ): World {
   const world: World = {
+    store,
     opens: 0,
     openColumns: [],
     closeOnEscape: [],
@@ -87,7 +90,17 @@ function stubClaudeCode(
     control: () => world.controls[world.controls.length - 1] ?? '',
   }
   const answered = new Set<string>()
-  mock.store(on, store)
+  // The store answered live, so a test can change it as another session would
+  on('store.get', ($, e) => ({ value: store[e.key] }))
+  on('store.set', ($, e) => {
+    store[e.key] = e.value
+    return { value: undefined }
+  })
+  on('store.delete', ($, e) => {
+    delete store[e.key]
+    return { value: undefined }
+  })
+  on('store.keys', () => ({ value: Object.keys(store) }))
   mock.env(on, { HOME: '/home/ada', XDG_RUNTIME_DIR: '/run/user/1000', TERM: 'xterm-256color', ...env })
   on('command.register', () => ({ value: undefined }) as never)
   on('session.start', () => ({ cwd: '/work' }) as never)
@@ -775,4 +788,23 @@ test('in the pane, Esc goes back to Claude, and the countdown shows on the game'
   await clock.advance(2000)
   expect(world.control()).toMatch(/^play=0 /)
   expect(world.control()).not.toContain('countdown=')
+})
+
+test('turning ClaudeBoy on or off in one session reaches the others at their next turn', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on, clock)
+  await startSession($)
+
+  // Another session turned it off: this one stays out
+  world.store.isOn = false
+  await $.turn.start({ turnId: 't1', text: 'refactor auth' })
+  await clock.advance(3000)
+  expect(world.opens).toBe(0)
+  await finishTurn($)
+
+  // And on again: this one drops in
+  world.store.isOn = true
+  await $.turn.start({ turnId: 't2', text: 'again' })
+  await clock.advance(2000)
+  expect(world.opens).toBe(1)
 })
