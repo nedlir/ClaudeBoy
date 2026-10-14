@@ -1207,9 +1207,19 @@ export const register: Register = (on) => {
       else await openPane($)
       return { value: undefined }
     }
-    if (e.origin?.kind === 'person' && isTurnRunning && !isWelcomeOpen) isDismissed = true
+    if (e.origin?.kind !== 'person') {
+      goAway($, '')
+      return next(e)
+    }
+    // The person's close (Esc, the close mark) is refused and the pane closed
+    // as this plugin's own: Claude Code places a pane opened unasked on a
+    // terminal under 144 columns only if the person hasn't closed it by hand,
+    // so a close of theirs would stop the game opening by itself
+    if (isTurnRunning && !isWelcomeOpen) isDismissed = true
+    isWelcomeOpen = false
     goAway($, '')
-    return next(e)
+    $.clock.after(0, () => void $.ui.close({ id: PANE }))
+    return { value: undefined }
   })
 
   on('ui.message', async ($, e) => {

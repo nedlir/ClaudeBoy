@@ -618,10 +618,10 @@ static void dock(struct GameWindow* window, int scale) {
 	const int areaWidth = (int) area[2];
 	const int areaHeight = (int) area[3];
 	// The console as large as fits the desktop's height, at a whole multiple
-	// of its size, and never much more than two fifths of its width
+	// of its size, and never more than half its width
 	struct ConsoleShape shape;
 	const int fits =
-		consoleFit(areaWidth * 45 / 100 - 2 * DRAWER_MARGIN, areaHeight - 2 * DRAWER_MARGIN - textArea(window), &shape);
+		consoleFit(areaWidth / 2 - 2 * DRAWER_MARGIN, areaHeight - 2 * DRAWER_MARGIN - textArea(window), &shape);
 	scale = scale < 1 || scale > fits ? fits : scale;
 	scale = scale > 8 ? 8 : scale;
 	window->width = shape.width * scale + 2 * DRAWER_MARGIN;
