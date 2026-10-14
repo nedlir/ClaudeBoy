@@ -477,6 +477,9 @@ static bool openGame(struct Engine* engine, const char* romPath, char* error, si
 	// Black-and-white games get the colors a Super Game Boy or Game Boy Color
 	// would have given them
 	mCoreConfigSetDefaultIntValue(&core->config, "gb.colors", GB_COLORS_SGB_CGB_FALLBACK);
+	// A Super Game Boy game, played as on one, keeps its colors but not the
+	// picture frame the Super Game Boy drew around it: the console has its own
+	mCoreConfigSetDefaultIntValue(&core->config, "sgb.borders", 0);
 	mCoreLoadForeignConfig(core, &core->config);
 
 	engine->video = calloc(STRIDE * 224, sizeof(color_t));
@@ -739,8 +742,14 @@ static inline uint32_t rgbOf(color_t pixel) {
 }
 
 static void copyFrame(const struct Engine* engine, color_t* out) {
+	// The game, from the middle of a bordered frame if one is drawn after all
+	unsigned width = WIDTH;
+	unsigned height = HEIGHT;
+	engine->core->desiredVideoDimensions(engine->core, &width, &height);
+	const unsigned left = width > WIDTH ? (width - WIDTH) / 2 : 0;
+	const unsigned top = height > HEIGHT ? (height - HEIGHT) / 2 : 0;
 	for (int y = 0; y < HEIGHT; y++) {
-		memcpy(&out[y * WIDTH], &engine->video[y * STRIDE], WIDTH * sizeof(color_t));
+		memcpy(&out[y * WIDTH], &engine->video[(top + y) * STRIDE + left], WIDTH * sizeof(color_t));
 	}
 }
 
