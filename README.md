@@ -24,6 +24,8 @@ It was built against Pokémon Yellow.
 
 ## Setup
 
+ClaudeBoy runs on Linux only, for now.
+
 1. Build the emulator, once. It fetches mGBA 0.10.5's source (about 14 MB,
    checked against its checksum) and needs `cmake`, a C compiler and `curl`:
 
