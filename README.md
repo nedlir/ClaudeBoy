@@ -97,8 +97,11 @@ there is one: an autosave carries the in-game save it was made with, and
 loading it writes that back. Set `CLAUDEBOY_DATA_DIR` to keep saves and ROMs
 somewhere else.
 
-One session at a time plays a given game. Another session that tries gets told
-so, and stays out for a minute.
+One session at a time plays a given game. When another session has it, the
+pane asks "Would you like to play it here?": 1 or Enter on Yes, 0 or Enter on
+No, or move between them with the arrows. Yes makes the other session save
+and hand the game over (it says where the game went); No stays out for the
+rest of the turn.
 
 ## Where the game shows
 

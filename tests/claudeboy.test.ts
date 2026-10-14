@@ -516,7 +516,7 @@ test('/claudeboy off hands back and stops the engine', SLOW, async ($, on) => {
   expect(world.opens).toBe(1)
 })
 
-test('stays out for a minute when another session is playing the game', SLOW, async ($, on) => {
+test('asks whether to play here when another session is playing the game; 1 asks that session for it', SLOW, async ($, on) => {
   const clock = mock.clock(on)
   const world = stubClaudeCode(on, clock, { isBusy: true })
   await startSession($)
@@ -524,19 +524,65 @@ test('stays out for a minute when another session is playing the game', SLOW, as
   await $.turn.start({ turnId: 't1', text: 'refactor auth' })
   await clock.advance(2000)
   await clock.settle()
-  expect(world.toasts).toContain('Pokemon Yellow is being played in another Claude Code session.')
+  const game = await $.ui.mount(GAME)
+  expect(await game.find({ text: /Pokemon Yellow is being played in another Claude Code session/ })).toBeDefined()
+  expect(await game.find({ text: /Would you like to play it here\?/ })).toBeDefined()
+  expect(world.closes).toBe(0)
+
+  await game.press({ key: 'takeover-yes' })
+  await clock.settle()
+  expect(world.controls.some((line) => /cmds=\d+:takeover/.test(line))).toBe(true)
+  expect(await game.find({ text: /Asking the other session for Pokemon Yellow/ })).toBeDefined()
+
+  // That session let go: the game is here now
+  world.engine.push('@playing')
+  await clock.settle()
+  expect(await game.find({ text: /Would you like to play it here\?/ })).toBeUndefined()
+  expect(world.control()).toMatch(/^play=1 /)
+})
+
+test('0 stays out of the game for the turn, and the next turn asks again', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on, clock, { isBusy: true })
+  await startSession($)
+
+  await $.turn.start({ turnId: 't1', text: 'refactor auth' })
+  await clock.advance(2000)
+  await clock.settle()
+  const game = await $.ui.mount(GAME)
+  await game.press({ key: 'takeover-no' })
+  await clock.settle()
   expect(world.closes).toBe(1)
+  expect(world.control()).toMatch(/^play=0 /)
+  const opens = world.opens
+  await $.tool.call({ tool: 'Bash', command: 'ls' } as never)
+  await clock.advance(5000)
+  expect(world.opens).toBe(opens)
   await finishTurn($)
 
   await $.turn.start({ turnId: 't2', text: 'again' })
-  await clock.advance(5000)
-  expect(world.opens).toBe(1)
-  await finishTurn($, { turnId: 't2' })
-
-  await clock.advance(60_000)
-  await $.turn.start({ turnId: 't3', text: 'and again' })
   await clock.advance(2000)
-  expect(world.opens).toBe(2)
+  await clock.settle()
+  expect(world.opens).toBeGreaterThan(opens)
+})
+
+test('a session asked for the game hands it over and says where it went', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on, clock)
+  await startSession($)
+
+  await $.turn.start({ turnId: 't1', text: 'refactor auth' })
+  await clock.advance(2000)
+  expect(world.control()).toMatch(/^play=1 /)
+  world.engine.push('@saved auto 5000')
+  world.engine.push('@yielded')
+  await clock.settle()
+  expect(world.toasts).toContain('Pokemon Yellow moved to another Claude Code session.')
+  expect(world.control()).toMatch(/^play=0 /)
+  // Not back for the rest of this turn
+  await $.tool.call({ tool: 'Bash', command: 'ls' } as never)
+  await clock.advance(5000)
+  expect(world.control()).toMatch(/^play=0 /)
 })
 
 test('F steps the speed up to ×2, then ×4, then back to ×1', SLOW, async ($, on) => {

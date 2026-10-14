@@ -25,7 +25,6 @@ const COUNTDOWN_SECONDS = 3
 const AWAY_STOP_MS = 10 * 60 * 1000
 const COMMAND_TIMEOUT_MS = 5000
 // After another session turned the engine away, stay out this long
-const BUSY_BACKOFF_MS = 60 * 1000
 const MESSAGE_MS = 2500
 // The dock's width asked for when the pane opens; the person's own wins
 const DOCK_COLUMNS = 100
@@ -127,7 +126,10 @@ let engine: ReturnType<Dollar['process']['spawn']> | null = null
 let engineExited: Promise<void> | null = null
 let runDir: string | null = null
 let engineError: string | null = null
-let busyUntil = 0
+// Another session has the game: asking whether to play it here, then asking
+// that session for it
+let isAskingTakeover = false
+let isTakingOver = false
 let awayTimer: Timer | null = null
 let commands: Command[] = []
 let nextCommandId = 1
@@ -276,8 +278,7 @@ async function dropIn($: Dollar) {
   if (phase !== 'waiting') return
   timer = null
   const surfaces = await $.session.surfaces()
-  const isBusy = (await $.clock.now()) < busyUntil
-  if (!surfaces.includes('terminal') || isBusy || (await loadGame($)) !== null || phase !== 'waiting') {
+  if (!surfaces.includes('terminal') || (await loadGame($)) !== null || phase !== 'waiting') {
     if (phase === 'waiting') phase = 'idle'
     return
   }
@@ -317,11 +318,12 @@ function drawerColumns(): number {
 // While the drawer is out, the pane opens beside the transcript as wide as
 // the drawer, so the transcript moves aside rather than under it. It never
 // takes the keys: they go to the drawer. Where it doesn't fit, it stays shut.
-async function openDrawerPane($: Dollar) {
+async function openDrawerPane($: Dollar, isFocused = false) {
   const opened = await $.ui.open({
     id: PANE,
     title: game?.title ?? 'ClaudeBoy',
     closeOnEscape: true,
+    ...(isFocused ? { focus: true as const } : {}),
     columns: drawerColumns(),
     rows: STATUS_ROWS + 2,
   })
@@ -395,6 +397,8 @@ function keepPlaying($: Dollar) {
 
 // Leaving the pane, whoever closes it: pause, which saves the game
 function goAway($: Dollar, why: string) {
+  isAskingTakeover = false
+  isTakingOver = false
   const wasPlaying = phase === 'playing' || phase === 'countdown'
   if (!wasPlaying && !isWelcomeOpen && !wanted.isPlaying) {
     cancelTimer()
@@ -538,6 +542,19 @@ function onEngineLine($: Dollar, line: string) {
     case '@busy':
       void onBusy($)
       break
+    case '@playing':
+      if (isAskingTakeover || isTakingOver) {
+        isAskingTakeover = false
+        isTakingOver = false
+        redraw($)
+      }
+      break
+    case '@yielded':
+      void leaveGame($, (game?.title ?? 'The game') + ' moved to another Claude Code session.')
+      break
+    case '@notyielded':
+      void leaveGame($, "The other session didn't let go of " + (game?.title ?? 'the game') + '. Restart it to play here.')
+      break
     case '@key':
       // Typed in the game's window: what a key over the pane's picture does
       if (words[0] && (phase === 'playing' || phase === 'countdown')) void onKey($, words[0])
@@ -580,13 +597,43 @@ async function noWindow($: Dollar, reason: string) {
 }
 
 // Another session is playing this game right now: it has the saves until it
-// pauses, so stay out for a while
+// pauses. The pane asks whether to play it here instead, with the keys, so 1
+// and 0 or the arrows and Enter answer. Should that session pause first, the
+// engine takes the game and the question goes.
 async function onBusy($: Dollar) {
-  busyUntil = (await $.clock.now()) + BUSY_BACKOFF_MS
-  if (phase === 'playing' || phase === 'countdown') {
-    $.ui.toast((game?.title ?? 'This game') + ' is being played in another Claude Code session.', { timeoutMs: 6000 })
-    await handBack($, '')
-  }
+  if (phase !== 'playing' && phase !== 'countdown') return
+  isAskingTakeover = true
+  isTakingOver = false
+  if (pictureMode() === 'window') await openDrawerPane($, true)
+  else await openPane($)
+  redraw($)
+}
+
+// Yes: the other session saves and lets go, then the engine here takes it
+async function takeOver($: Dollar) {
+  isAskingTakeover = false
+  isTakingOver = true
+  redraw($)
+  await sendCommand($, 'takeover')
+}
+
+// No: stay out for the rest of the turn
+async function declineTakeover($: Dollar) {
+  isAskingTakeover = false
+  isTakingOver = false
+  if (isTurnRunning) isDismissed = true
+  await handBack($, '')
+}
+
+// The game moved: another session asked for it, or wouldn't let it go
+async function leaveGame($: Dollar, toast: string) {
+  isAskingTakeover = false
+  isTakingOver = false
+  if (isTurnRunning) isDismissed = true
+  $.ui.toast(toast, { timeoutMs: 6000 })
+  await handBack($, '')
+  // Saved already, and no pause will come to say so
+  toastWhenPaused = null
 }
 
 // What the engine reads every frame: one line, rewritten whole. Commands stay
@@ -1239,6 +1286,21 @@ export const register: Register = (on) => {
     }
 
     if (engineError && !engine) return <Text>{engineError}</Text>
+
+    if (isAskingTakeover) {
+      return (
+        <Box flexDirection="column" gap={1}>
+          <Text>{(game?.title ?? 'This game') + ' is being played in another Claude Code session.'}</Text>
+          <Text bold>Would you like to play it here?</Text>
+          <Box flexDirection="column">
+            <Button key="takeover-yes" label="Yes" hotkey="1" plain autoFocus onPress={() => takeOver($)} />
+            <Button key="takeover-no" label="No" hotkey="0" plain onPress={() => declineTakeover($)} />
+          </Box>
+          <Text dimColor>1 or 0, or ↑↓ and Enter</Text>
+        </Box>
+      )
+    }
+    if (isTakingOver) return <Text dimColor>{'Asking the other session for ' + (game?.title ?? 'the game') + '…'}</Text>
 
     const mode = pictureMode()
     if (mode === 'window') {

@@ -61,6 +61,10 @@ static const char USAGE[] =
 	"        @saved <slot> <unix-ms>         a save state was written\n"
 	"        @playing, @paused\n"
 	"        @busy                           another session is playing it\n"
+	"        @yielded                        handed the game to a session that\n"
+	"                                        asked for it (cmds=N:takeover)\n"
+	"        @notyielded                     the session playing it didn't hand\n"
+	"                                        it over\n"
 	"        @key <letter or digit>          typed in the game's window\n"
 	"        @closed                         the person closed the window (Esc)\n"
 	"        @drawer <width> <desktop-width> the window's width, in pixels\n"
@@ -199,6 +203,16 @@ struct Engine {
 	int lock;
 	bool hasLock;
 	bool isBusyReported;
+	// When this engine took the game, by the wall clock, so a request to hand
+	// it over from before then is stale; and when it last looked for one
+	int64_t claimedAtNs;
+	int64_t lastTakeoverCheckNs;
+	// Handed the game to another session: not taking it back until the mod
+	// pauses here
+	bool hasYielded;
+	// Asked the session playing it to hand it over, and since when
+	bool isTakingOver;
+	int64_t takeoverSinceNs;
 	struct stat autosave;
 	bool hasAutosave;
 
@@ -577,11 +591,62 @@ static bool claimGame(struct Engine* engine) {
 		return false;
 	}
 	engine->hasLock = true;
+	struct timespec wall;
+	clock_gettime(CLOCK_REALTIME, &wall);
+	engine->claimedAtNs = (int64_t) wall.tv_sec * 1000000000LL + wall.tv_nsec;
 	if (isAutosaveNewer(engine) && loadState(engine, "auto")) {
 		engine->hasPlayedSinceSave = false;
 		emit("@log picked up the autosave another session left");
 	}
 	return true;
+}
+
+// --- Handing the game over ------------------------------------------------
+//
+// A session that finds the game taken can ask for it: it leaves a .takeover
+// file by the saves. The engine playing it sees the file, pauses, saves and
+// lets go, and the asker takes it.
+
+static void takeoverPath(const struct Engine* engine, char* path, size_t size) {
+	snprintf(path, size, "%s/.takeover", engine->saves);
+}
+
+static void requestTakeover(struct Engine* engine) {
+	char path[PATH_MAX];
+	takeoverPath(engine, path, sizeof(path));
+	const int fd = open(path, O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0600);
+	if (fd >= 0) {
+		dprintf(fd, "%d\n", (int) getpid());
+		close(fd);
+	}
+	engine->isTakingOver = true;
+	engine->takeoverSinceNs = monotonicNs();
+}
+
+static void endTakeover(struct Engine* engine) {
+	if (!engine->isTakingOver) {
+		return;
+	}
+	char path[PATH_MAX];
+	takeoverPath(engine, path, sizeof(path));
+	unlink(path);
+	engine->isTakingOver = false;
+}
+
+// Asked for since this engine took the game, by another engine
+static bool isTakeoverAsked(struct Engine* engine) {
+	const int64_t now = monotonicNs();
+	if (now - engine->lastTakeoverCheckNs < 250000000LL) {
+		return false;
+	}
+	engine->lastTakeoverCheckNs = now;
+	char path[PATH_MAX];
+	takeoverPath(engine, path, sizeof(path));
+	struct stat request;
+	if (stat(path, &request) != 0) {
+		return false;
+	}
+	return modifiedNs(&request) > engine->claimedAtNs;
 }
 
 // Lets another session play: once this engine has paused and saved
@@ -1297,6 +1362,9 @@ static void runCommand(struct Engine* engine, const struct Command* command) {
 	} else if (!strcmp(name, "refresh")) {
 		engine->mustShow = true;
 		emit("@done %ld ok refreshed", command->id);
+	} else if (!strcmp(name, "takeover")) {
+		requestTakeover(engine);
+		emit("@done %ld ok asked", command->id);
 	} else if (!strcmp(name, "quit")) {
 		isStopRequested = 1;
 		emit("@done %ld ok quitting", command->id);
@@ -1595,6 +1663,8 @@ static int play(const char* romPath, const char* saves, const char* run) {
 
 		if (!engine.wanted.isPlaying) {
 			engine.isBusyReported = false;
+			engine.hasYielded = false;
+			endTakeover(&engine);
 			if (engine.isPlaying) {
 				engine.isPlaying = false;
 				stopAudio(&engine);
@@ -1614,15 +1684,26 @@ static int play(const char* romPath, const char* saves, const char* run) {
 			continue;
 		}
 
+		if (engine.hasYielded) {
+			sleepMs(15);
+			continue;
+		}
 		if (!engine.isPlaying) {
 			if (!claimGame(&engine)) {
 				if (!engine.isBusyReported) {
 					engine.isBusyReported = true;
 					emit("@busy");
 				}
-				sleepMs(100);
+				// Asked to hand over and still held: an engine from before
+				// sessions could ask, or one stuck
+				if (engine.isTakingOver && monotonicNs() - engine.takeoverSinceNs > 4000000000LL) {
+					endTakeover(&engine);
+					emit("@notyielded");
+				}
+				sleepMs(50);
 				continue;
 			}
+			endTakeover(&engine);
 			engine.isPlaying = true;
 			engine.mustShow = true;
 			next = monotonicNs();
@@ -1641,6 +1722,17 @@ static int play(const char* romPath, const char* saves, const char* run) {
 		engine.hasPlayedSinceSave = true;
 		showFrame(&engine, engine.mustShow);
 		engine.mustShow = false;
+
+		// Another session asked for the game: save, let go, and say so
+		if (isTakeoverAsked(&engine)) {
+			engine.isPlaying = false;
+			engine.hasYielded = true;
+			stopAudio(&engine);
+			saveState(&engine, "auto");
+			releaseGame(&engine);
+			emit("@yielded");
+			continue;
+		}
 
 		const int64_t now = monotonicNs();
 		if (now - engine.lastSaveNs >= AUTOSAVE_SECONDS * 1000000000LL) {
@@ -1661,6 +1753,7 @@ static int play(const char* romPath, const char* saves, const char* run) {
 		saveState(&engine, "auto");
 	}
 	releaseGame(&engine);
+	endTakeover(&engine);
 	removeShmFrames(&engine);
 	if (engine.window) {
 		gameWindowClose(engine.window);
