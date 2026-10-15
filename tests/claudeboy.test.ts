@@ -202,8 +202,10 @@ function stubClaudeCode(
   // No settings hook decides: the dialog shows
   on('classic.PermissionRequest', () => ({}) as never)
   on('tool.call', async ($, e) => {
-    // 'Slow' runs until the test lets it go, as a call waiting on its dialog
-    if ((e as { tool: string }).tool === 'Slow') await new Promise<void>((resolve) => (releaseSlow = resolve))
+    // 'Slow', or a call marked isSlow, runs until the test lets it go, as a
+    // call waiting on its dialog
+    const call = e as { tool: string; isSlow?: boolean }
+    if (call.tool === 'Slow' || call.isSlow) await new Promise<void>((resolve) => (releaseSlow = resolve))
     return { result: 'ok' } as never
   })
   return world
@@ -1207,4 +1209,44 @@ test('malformed engine lines are shrugged off: a garbled @term, an @frame with n
   await clock.settle()
   expect(world.openColumns.every((columns) => columns === undefined || Number.isFinite(columns))).toBe(true)
   expect(world.control()).toMatch(/^play=1 /)
+})
+
+test('a question that also raises a permission prompt lets the game back once answered', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on)
+  await startSession($)
+
+  await $.turn.start({ turnId: 't1', text: 'plan it' })
+  await clock.advance(2000)
+  const asked = $.tool.call({ tool: 'AskUserQuestion', questions: [], isSlow: true } as never)
+  await clock.settle()
+  await $.classic.PermissionRequest({ tool_name: 'AskUserQuestion', tool_input: { questions: [], isSlow: true } } as never)
+  expect(world.closes).toBe(1)
+  world.release()
+  await asked
+  // Claude carries on in the same turn: the game comes back
+  await $.tool.call({ tool: 'Bash', command: 'make' } as never)
+  await clock.advance(2000)
+  expect(world.opens).toBe(2)
+  expect(world.control()).toMatch(/^play=1 /)
+})
+
+test('two calls of one tool, only one asking: no drop-in until that one is answered', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on)
+  await startSession($)
+
+  await $.turn.start({ turnId: 't1', text: 'refactor auth' })
+  await clock.advance(2000)
+  const asked = $.tool.call({ tool: 'Bash', command: 'rm -rf build', isSlow: true } as never)
+  await clock.settle()
+  await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'rm -rf build', isSlow: true } } as never)
+  // The other Bash, needing no dialog, ends first
+  await $.tool.call({ tool: 'Bash', command: 'ls' } as never)
+  await clock.advance(3000)
+  expect(world.opens).toBe(1)
+  world.release()
+  await asked
+  await clock.advance(2000)
+  expect(world.opens).toBe(2)
 })

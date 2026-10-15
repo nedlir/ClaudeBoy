@@ -144,6 +144,8 @@ let engineExited: Promise<void> | null = null
 // The engine stopEngine is ending: its exit is no failure, and it isn't
 // played on any more
 let quittingEngine: ReturnType<Dollar['process']['spawn']> | null = null
+// stopEngine's own end: the engine gone, or given up on
+let engineStopped: Promise<void> | null = null
 let runDir: string | null = null
 let engineError: string | null = null
 // Another session has the game: asking whether to play it here
@@ -388,11 +390,34 @@ function cancelTimer() {
   timer = null
 }
 
-// The tools whose dialogs (a permission, a question, a plan) are open: no
-// drop-in until they're answered, however other tool calls end meanwhile.
-// A permission names its tool, not its call: the first call of that tool to
-// end is taken as the one answered.
-let openAsks: string[] = []
+// The tool calls running, by id, with their tool and arguments; and those
+// whose dialog (a permission, a question, a plan) is open: no drop-in until
+// they're answered (their call ends), however other calls end meanwhile.
+let runningCalls = new Map<string, { tool: string; input: string }>()
+let askingCalls = new Set<string>()
+// For a call that comes without an id
+let nextCallId = 1
+
+// The same JSON whatever order the keys came in
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return '[' + value.map(stableJson).join(',') + ']'
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b))
+    return '{' + entries.map(([key, inner]) => JSON.stringify(key) + ':' + stableJson(inner)).join(',') + '}'
+  }
+  return JSON.stringify(value) ?? 'null'
+}
+
+// A permission dialog names a tool and its input, not the call: the running
+// call they match, or the only one of that tool; none for Claude Code's own
+// prompts
+function callAsked(tool: string, input: unknown): string | null {
+  const calls = [...runningCalls].filter(([, call]) => call.tool === tool)
+  const wanted = stableJson(input)
+  const exact = calls.find(([, call]) => call.input === wanted)
+  if (exact) return exact[0]
+  return calls.length === 1 ? (calls[0]?.[0] ?? null) : null
+}
 
 // In the game: playing, or counting down to the hand-back
 function isInGame(): boolean {
@@ -400,7 +425,7 @@ function isInGame(): boolean {
 }
 
 function armDropIn($: Dollar) {
-  if (!isOn || !isTurnRunning || isDismissed || phase !== 'idle' || menu || openAsks.length) return
+  if (!isOn || !isTurnRunning || isDismissed || phase !== 'idle' || menu || askingCalls.size) return
   phase = 'waiting'
   timer = $.clock.after(DROP_IN_DELAY_MS, () => void dropIn($))
 }
@@ -532,8 +557,8 @@ async function startPlaying($: Dollar) {
   }
   redraw($)
   if (engine && engine === quittingEngine) {
-    // On its way out: a fresh one once it's gone
-    void engineExited?.then(() => {
+    // On its way out: a fresh one once it's gone, or given up on
+    void engineStopped?.then(() => {
       if (isInGame() && !engine) void runEngine($)
     })
   } else if (engine) scheduleControl($)
@@ -913,22 +938,31 @@ async function ensureRunning($: Dollar): Promise<string | null> {
 }
 
 async function stopEngine($: Dollar) {
+  let markStopped = () => {}
+  const stopped = new Promise<void>((resolve) => {
+    markStopped = resolve
+  })
   awayTimer?.cancel()
   awayTimer = null
   const child = engine
   if (!child) return
   quittingEngine = child
-  // It saves and says goodbye on its own; ending the loop is the last resort
-  void sendCommand($, 'quit')
-  await Promise.race([engineExited, $.clock.sleep(1500)])
-  if (engine === child) {
-    await child.return({ code: null, signal: null }).catch(() => {})
-    // Its stream ends after: wait for that too, so a new engine follows it
-    await Promise.race([engineExited, $.clock.sleep(1000)])
+  engineStopped = stopped
+  try {
+    // It saves and says goodbye on its own; ending the loop is the last resort
+    void sendCommand($, 'quit')
+    await Promise.race([engineExited, $.clock.sleep(1500)])
+    if (engine === child) {
+      await child.return({ code: null, signal: null }).catch(() => {})
+      // Its stream ends after: wait for that too, so a new engine follows it
+      await Promise.race([engineExited, $.clock.sleep(1000)])
+    }
+    // Given up on if it still hasn't ended: a new one may start meanwhile, and
+    // mustn't be handed what was this one's (its quit above, most of all)
+    if (engine === child) forgetEngine()
+  } finally {
+    markStopped()
   }
-  // Given up on if it still hasn't ended: a new one may start meanwhile, and
-  // mustn't be handed what was this one's (its quit above, most of all)
-  if (engine === child) forgetEngine()
 }
 
 // No engine any more: its commands unanswered, its folder not written to
@@ -1508,7 +1542,8 @@ export const register: Register = (on) => {
     if (e.agentId) return next(e)
     isTurnRunning = true
     isDismissed = false
-    openAsks = []
+    runningCalls = new Map()
+    askingCalls = new Set()
     // On or off as /claudeboy last left it in any session
     isOn = (await $.store.get('isOn')) === true
     if (isWelcomeOpen && !menu) {
@@ -1526,7 +1561,8 @@ export const register: Register = (on) => {
   on('turn.complete', async ($, e, next) => {
     if (e.agentId) return next(e)
     isTurnRunning = false
-    openAsks = []
+    runningCalls = new Map()
+    askingCalls = new Set()
     if (phase === 'waiting' || phase === 'offered') {
       cancelDropIn($)
     } else if (phase === 'playing' && !isOpenedByCommand) {
@@ -1541,23 +1577,27 @@ export const register: Register = (on) => {
   // A permission dialog is about to ask the person. In auto mode most asks go
   // to the classifier instead, and this never fires for those: play goes on.
   on('classic.PermissionRequest', async ($, e, next) => {
-    openAsks.push(e.tool_name)
+    const asked = callAsked(e.tool_name, e.tool_input)
+    if (asked) askingCalls.add(asked)
     await needsYou($)
     return next(e)
   })
 
   on('tool.call', async ($, e, next) => {
+    const { tool, tool_use_id: callId, ...input } = e as { tool: string; tool_use_id?: string } & Record<string, unknown>
+    const id = callId ?? 'call-' + nextCallId++
+    runningCalls.set(id, { tool, input: stableJson(input) })
     // These put a question or a plan to the person whatever the mode
-    if (e.tool === 'AskUserQuestion' || e.tool === 'ExitPlanMode') {
-      openAsks.push(e.tool)
+    if (tool === 'AskUserQuestion' || tool === 'ExitPlanMode') {
+      askingCalls.add(id)
       await needsYou($)
     }
     try {
       return await next(e)
     } finally {
       // Answered (its call ended): once nothing else is asked, drop back in
-      const asked = openAsks.indexOf(e.tool)
-      if (asked >= 0) openAsks.splice(asked, 1)
+      runningCalls.delete(id)
+      askingCalls.delete(id)
       armDropIn($)
     }
   })
@@ -1610,7 +1650,7 @@ export const register: Register = (on) => {
     }
     // A Game Boy button is "any other key" for the slot picker too
     const taps = post.taps.reduce((sum, count) => sum + count, 0)
-    if (picker && (post.held !== 0 || taps > lastTaps)) {
+    if (picker && taps > lastTaps) {
       picker = null
       redraw($)
     }
