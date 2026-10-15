@@ -1441,9 +1441,11 @@ export const register: Register = (on) => {
   })
 
   on('session.end', async ($, e, next) => {
-    // Out of the game first, the pane closed (after /clear the process goes
-    // on), so the engine ending isn't taken for a failure
-    if (isInGame() || isWelcomeOpen || menu) await handBack($, '')
+    // Out of the game first, so the engine ending isn't taken for a failure.
+    // After /clear or a resume the process goes on: the pane is closed too.
+    // On exit there's no time for that: the engine must save and go first.
+    const isProcessGoingOn = e.reason === 'clear' || e.reason === 'resume'
+    if (isProcessGoingOn && (isInGame() || isWelcomeOpen || menu)) await handBack($, '')
     else goAway($, '')
     await stopEngine($)
     return next(e)

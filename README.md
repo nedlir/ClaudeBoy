@@ -27,11 +27,12 @@ It was built against Pokémon Yellow.
 
 ## Setup
 
-ClaudeBoy runs on Linux only, for now.
+ClaudeBoy runs on Linux only, for now. It was made with Claude Code 2.1.300.
 
 1. Get it and build the emulator, once. The build fetches mGBA 0.10.5's
    source (about 14 MB, checked against its checksum) and needs `cmake`,
-   `make`, a C compiler, `tar` and `curl`:
+   `make`, a C compiler (`cc`), `tar`, `flock` and `curl`. On Ubuntu or
+   Debian: `sudo apt install build-essential cmake curl`.
 
    ```
    git clone https://github.com/nedlir/ClaudeBoy
@@ -48,8 +49,8 @@ ClaudeBoy runs on Linux only, for now.
    claude --plugin-dir path/to/ClaudeBoy
    ```
 
-   To keep it, install it from that folder, which stays the copy Claude Code
-   runs (after an edit to `hooks/`, `/reload-plugins` picks it up):
+   To keep it, install it from that folder (should Claude Code run a copy
+   of it, `/claudeboy` builds the emulator there the first time):
 
    ```
    claude plugin marketplace add path/to/ClaudeBoy
@@ -58,13 +59,16 @@ ClaudeBoy runs on Linux only, for now.
 
 3. Turn it on with `/claudeboy`. The first time, it asks for a game: pick one
    it found in your Downloads, Desktop, Documents or Games folder, your home
-   folder or a `roms` folder, or type or paste the path to a `.gb` or `.gbc`
-   file. `/claudeboy off` turns it off again.
+   folder, `~/roms`, the ClaudeBoy folder or its `roms`, or type or paste
+   the path to a `.gb` or `.gbc` file. `/claudeboy off` turns it off again.
+   With `--plugin-dir`, `/reload-plugins` picks up an edit to `hooks/`.
 
 ## Playing
 
 Click the game to give it the keys: the picture in the pane, or the console.
-Esc hands you back to Claude, or, during the countdown, keeps you playing.
+On the console, Esc hands you back to Claude. In the pane, Esc first gives
+the keys back to the prompt, so you can type to Claude while the game stays
+up, and Esc again closes it. During the countdown, Esc keeps you playing.
 
 | Game Boy | Key |
 | :- | :- |
@@ -116,12 +120,14 @@ delay in your desktop's settings shortens that stop.
 - **In-game saves** go to a regular battery save that other emulators read.
 
 Everything lives in `~/.local/share/claudeboy/saves/<game>/` (or under
-`$XDG_DATA_HOME/claudeboy` when that's set): `battery.sav`,
+`$XDG_DATA_HOME/claudeboy` when that's set), where `<game>` is the game's
+title and a checksum, like `pokemon-yellow-7d527d62`
+(`dist/claudeboy-engine info <rom>` prints it as `key`): `battery.sav`,
 `auto.state` and `slot1.state` to `slot9.state`. To bring a save from another
 emulator, put its `.sav` there as `battery.sav` and delete `auto.state`, if
 there is one: an autosave carries the in-game save it was made with, and
-loading it writes that back. Set `CLAUDEBOY_DATA_DIR` to keep saves
-somewhere else.
+loading it writes that back. Set `CLAUDEBOY_DATA_DIR` to use another folder
+in place of `~/.local/share/claudeboy`.
 
 Your game library remembers where each game's file is, and the files stay
 where they are. If you move one, open it again from its new place with O; its
@@ -164,7 +170,8 @@ rest of the turn.
 - **With no desktop**, as over SSH: in the pane, drawn with colored
   half-block characters, two pixels per cell. Small panes look blocky.
 
-`/claudeboy display auto|cells|image|window` overrides the choice, and
+`/claudeboy display auto|cells|image|window` overrides the choice (pictures,
+text, or the console; `auto` picks as above), and
 `CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1` tells Claude Code to send pictures to a
 terminal it doesn't recognize. kitty is one install away on Ubuntu:
 `sudo apt install kitty`. tmux passes no pictures through: inside it the
@@ -212,10 +219,12 @@ The engine can also be run by hand:
 
 ```
 dist/claudeboy-engine info <rom>
-dist/claudeboy-engine script <rom> <saves> <out> 600 tap:start 120 shot:title
+dist/claudeboy-engine script <rom> <saves> <out> 600 tap:start 120 shot:intro
 ```
 
-`script` takes no lock on the saves, so give it a `<saves>` folder of its
+`script` runs the game as fast as it can and writes each `shot:` as a
+`.ppm` picture in `<out>`; run the engine with no arguments for every step it
+knows. It takes no lock on the saves, so give it a `<saves>` folder of its
 own, not one a session plays from.
 
 ## Development
@@ -225,7 +234,8 @@ claude plugin validate .
 claude plugin test .
 ```
 
-The tests run the mod against a stand-in for Claude Code and a fake engine.
+The tests (about two minutes) run the mod against a stand-in for Claude Code
+and a fake engine; they need no build.
 Type checking in an editor needs `.claude-plugin/types/`, which Claude Code
 writes there once it has loaded the mod.
 
