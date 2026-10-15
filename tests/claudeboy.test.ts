@@ -65,6 +65,8 @@ type World = {
   store: Record<string, unknown>
   // Each command line the mod ran
   runs: (readonly string[])[]
+  // Lets a running 'Slow' tool call (one waiting on its dialog) end
+  release: () => void
 }
 
 // Answers everything the mod asks of Claude Code, and plays the engine: it
@@ -79,6 +81,9 @@ function stubClaudeCode(
     isBusy = false,
     // How a picture's blit is answered: drawn, or refused
     blit = (): Record<string, unknown> => ({}),
+    // The engine takes this long to save and quit, on this clock
+    quitDelayMs = 0,
+    clock = null as ReturnType<typeof mock.clock> | null,
     // Folders' listings beyond the ROMs folder, by how their path ends
     folders = {} as Record<string, { name: string; mtimeMs: number }[]>,
   } = {},
@@ -96,7 +101,9 @@ function stubClaudeCode(
     engine: channel(),
     control: () => world.controls[world.controls.length - 1] ?? '',
     runs: [],
+    release: () => releaseSlow(),
   }
+  let releaseSlow = () => {}
   const answered = new Set<string>()
   // The store answered live, so a test can change it as another session would
   on('store.get', ($, e) => ({ value: store[e.key] }))
@@ -161,8 +168,12 @@ function stubClaudeCode(
       if (name === 'save') world.engine.push('@saved ' + arg + ' 1000')
       world.engine.push('@done ' + id + ' ok ' + name + (arg ? ' ' + arg : ''))
       if (name === 'quit') {
-        world.engine.push('@bye')
-        world.engine.exit()
+        const quit = () => {
+          world.engine.push('@bye')
+          world.engine.exit()
+        }
+        if (quitDelayMs && clock) void clock.sleep(quitDelayMs).then(quit)
+        else quit()
       }
     }
     return { value: undefined }
@@ -190,7 +201,11 @@ function stubClaudeCode(
   on('tool.check', () => ({ decision: 'ask' as const }))
   // No settings hook decides: the dialog shows
   on('classic.PermissionRequest', () => ({}) as never)
-  on('tool.call', () => ({ result: 'ok' }) as never)
+  on('tool.call', async ($, e) => {
+    // 'Slow' runs until the test lets it go, as a call waiting on its dialog
+    if ((e as { tool: string }).tool === 'Slow') await new Promise<void>((resolve) => (releaseSlow = resolve))
+    return { result: 'ok' } as never
+  })
   return world
 }
 
@@ -1080,4 +1095,116 @@ test('turned on with no game to play, ClaudeBoy says so once, not every turn', S
   }
   expect(world.toasts.filter((text) => text.startsWith('ClaudeBoy: No game yet'))).toHaveLength(1)
   expect(world.opens).toBe(0)
+})
+
+test('no drop-in over an open permission dialog, though a parallel tool call ended', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on)
+  await startSession($)
+
+  await $.turn.start({ turnId: 't1', text: 'refactor auth' })
+  await clock.advance(2000)
+  // Bash waits on its dialog; Read, run beside it, needs none and ends
+  const asked = $.tool.call({ tool: 'Slow', command: 'rm -rf build' } as never)
+  await $.classic.PermissionRequest({ tool_name: 'Slow', tool_input: {} } as never)
+  expect(world.closes).toBe(1)
+  await $.tool.call({ tool: 'Read', file_path: '/work/a' } as never)
+  await clock.advance(3000)
+  expect(world.opens).toBe(1)
+  expect(world.control()).toMatch(/^play=0 /)
+  // Answered: its call ends, and the game comes back
+  world.release()
+  await asked
+  await clock.advance(2000)
+  expect(world.opens).toBe(2)
+  expect(world.control()).toMatch(/^play=1 /)
+})
+
+test('Claude finishing while a menu is up counts down once the menu closes', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on, { env: { DISPLAY: ':0' } })
+  await startSession($)
+
+  await $.turn.start({ turnId: 't1', text: 'refactor auth' })
+  await clock.advance(2000)
+  world.engine.push('@key g')
+  await clock.settle()
+  await finishTurn($)
+  await clock.advance(1000)
+  // Still in the menu: no countdown under it
+  expect(world.control()).not.toContain('countdown=')
+  const game = await $.ui.mount(GAME)
+  await game.press({ key: 'game-0' })
+  await clock.settle()
+  expect(world.control()).toContain(' countdown=3')
+  await clock.advance(3000)
+  expect(world.control()).toMatch(/^play=0 /)
+})
+
+test('a game picked from /claudeboy open mid-turn drops in without waiting for a tool call', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on)
+  await startSession($)
+
+  await $.turn.start({ turnId: 't1', text: 'refactor auth' })
+  await clock.advance(500)
+  await $.command.run({ command: 'claudeboy', args: 'open' } as never)
+  await clock.settle()
+  const game = await $.ui.mount(GAME)
+  await game.input({ key: 'rom-path', text: TETRIS })
+  await clock.advance(3000)
+  expect(world.control()).toMatch(/^play=1 /)
+})
+
+test('S then a Game Boy button cancels the slot picker, as any other key does', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on)
+  await startSession($)
+
+  await $.turn.start({ turnId: 't1', text: 'refactor auth' })
+  await clock.advance(2000)
+  const game = await $.ui.mount(GAME)
+  world.engine.push('@cells 1 100 45')
+  await clock.settle()
+  await game.key({ key: 's', in: 'pad' })
+  await game.advance(16)
+  await clock.settle()
+  expect(await game.find({ text: /Save to which slot\?/ })).toBeDefined()
+  await game.key({ key: 'z', in: 'pad' })
+  await game.advance(16)
+  await clock.settle()
+  expect(await game.find({ text: /Save to which slot\?/ })).toBeUndefined()
+})
+
+test('a drop-in just as the ten-minute stop is quitting the engine plays on a new one', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on, { clock, quitDelayMs: 300 })
+  await startSession($)
+
+  await $.turn.start({ turnId: 't1', text: 'refactor auth' })
+  await clock.advance(2000)
+  await finishTurn($)
+  await clock.advance(3000)
+  // The next turn's drop-in lands 100 ms after the stop sent quit
+  await clock.advance(10 * 60 * 1000 - 1900)
+  await $.turn.start({ turnId: 't2', text: 'again' })
+  await clock.advance(4000)
+  expect(world.toasts).not.toContain("ClaudeBoy's emulator stopped")
+  expect(world.spawns).toHaveLength(2)
+  expect(world.control()).toMatch(/^play=1 /)
+})
+
+test('malformed engine lines are shrugged off: a garbled @term, an @frame with no size', SLOW, async ($, on) => {
+  const clock = mock.clock(on)
+  const world = stubClaudeCode(on, { env: { DISPLAY: ':0' } })
+  await startSession($)
+
+  await $.turn.start({ turnId: 't1', text: 'refactor auth' })
+  await clock.advance(2000)
+  world.engine.push('@term abc 32 0 0')
+  world.engine.push('@drawer 512 1214')
+  world.engine.push('@frame /claudeboy-7-0')
+  await clock.settle()
+  expect(world.openColumns.every((columns) => columns === undefined || Number.isFinite(columns))).toBe(true)
+  expect(world.control()).toMatch(/^play=1 /)
 })

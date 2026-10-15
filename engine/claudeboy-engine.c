@@ -187,6 +187,8 @@ struct RomInfo {
 
 struct Engine {
 	struct mCore* core;
+	// Running for the mod (run), not a script
+	bool isLive;
 	color_t* video;
 	struct RomInfo rom;
 	char saves[PATH_MAX];
@@ -377,6 +379,12 @@ static uint32_t crc32Of(const uint8_t* data, size_t size) {
 // ROM's CRC-32, so two dumps or versions of one game keep separate saves
 static bool readRomInfo(const char* path, struct RomInfo* info, char* error, size_t errorSize) {
 	memset(info, 0, sizeof(*info));
+	// A file, not a pipe or a device to wait on forever
+	struct stat status;
+	if (stat(path, &status) == 0 && !S_ISREG(status.st_mode)) {
+		snprintf(error, errorSize, "that isn't a Game Boy ROM");
+		return false;
+	}
 	FILE* file = fopen(path, "rb");
 	if (!file) {
 		snprintf(error, errorSize, "can't open the ROM: %s", strerror(errno));
@@ -606,6 +614,12 @@ static bool loadState(struct Engine* engine, const char* slot) {
 	const bool isLoaded = mCoreLoadStateNamed(engine->core, vf, SAVESTATE_SAVEDATA | SAVESTATE_RTC);
 	vf->close(vf);
 	if (isLoaded) {
+		// A state holds no picture: paused, one frame is run to draw one (the
+		// game is held meanwhile, by whoever loads)
+		if (engine->isLive && !engine->isPlaying) {
+			engine->core->runFrame(engine->core);
+			engine->frames++;
+		}
 		engine->mustShow = true;
 		engine->hasPlayedSinceSave = true;
 		if (!strcmp(slot, "auto")) {
@@ -674,6 +688,7 @@ static void requestTakeover(struct Engine* engine) {
 	}
 	engine->isTakingOver = true;
 	engine->takeoverSinceNs = monotonicNs();
+	engine->hasYielded = false;
 	engine->isHolderStopped = false;
 }
 
@@ -744,6 +759,13 @@ static bool isTakeoverAsked(struct Engine* engine) {
 		return false;
 	}
 	return modifiedNs(&request) > engine->claimedAtNs;
+}
+
+// The autosave, said when it fails: the person would never know otherwise
+static void autosave(struct Engine* engine) {
+	if (!saveState(engine, "auto")) {
+		emit("@log couldn't write the autosave in %s", engine->saves);
+	}
 }
 
 // Lets another session play: once this engine has paused and saved
@@ -1526,7 +1548,16 @@ static void readControl(struct Engine* engine) {
 
 	struct Command commands[MAX_COMMANDS];
 	int commandCount = 0;
+	const enum ViewKind wasView = engine->wanted.view;
 	parseControl(line, &engine->wanted, commands, &commandCount);
+	// Paused, nothing draws by itself: a new view, size or count is drawn now
+	if (!engine->isPlaying) {
+		engine->mustShow = true;
+	}
+	// Pictures nobody will read any more go now, not when the engine ends
+	if (wasView == VIEW_IMAGE && engine->wanted.view != VIEW_IMAGE) {
+		removeShmFrames(engine);
+	}
 	for (int i = 0; i < BUTTONS; i++) {
 		// A count that went down is a new gamepad counting from zero
 		if (engine->hasTaps && engine->wanted.taps[i] > engine->taps[i]) {
@@ -1779,7 +1810,7 @@ static struct Engine* windowEngine = NULL;
 static void onWindowLost(void) {
 	if (windowEngine) {
 		if (windowEngine->hasPlayedSinceSave && windowEngine->hasLock) {
-			saveState(windowEngine, "auto");
+			autosave(windowEngine);
 		}
 		removeShmFrames(windowEngine);
 		removeRunDir(windowEngine);
@@ -1814,8 +1845,10 @@ static int play(const char* romPath, const char* saves, const char* run) {
 	char error[512];
 	if (!openGame(&engine, romPath, error, sizeof(error))) {
 		emit("@error %s", error);
+		removeRunDir(&engine);
 		return 1;
 	}
+	engine.isLive = true;
 	// The autosave loaded only while no other session plays the game: loading
 	// writes its battery save into battery.sav, which that session's game has
 	// mapped. Taken later, the game loads it then (claimGame).
@@ -1851,7 +1884,7 @@ static int play(const char* romPath, const char* saves, const char* run) {
 				// Handed back to Claude: this is the autosave, and then another
 				// session may play
 				if (engine.hasPlayedSinceSave) {
-					saveState(&engine, "auto");
+					autosave(&engine);
 				}
 				releaseGame(&engine);
 				emit("@paused");
@@ -1918,7 +1951,7 @@ static int play(const char* romPath, const char* saves, const char* run) {
 			engine.isPlaying = false;
 			engine.hasYielded = true;
 			stopAudio(&engine);
-			saveState(&engine, "auto");
+			autosave(&engine);
 			releaseGame(&engine);
 			emit("@yielded");
 			continue;
@@ -1927,9 +1960,7 @@ static int play(const char* romPath, const char* saves, const char* run) {
 		const int64_t now = monotonicNs();
 		if (now - engine.lastSaveNs >= AUTOSAVE_SECONDS * 1000000000LL) {
 			engine.lastSaveNs = now;
-			if (!saveState(&engine, "auto")) {
-				emit("@log couldn't write the autosave in %s", engine.saves);
-			}
+			autosave(&engine);
 		}
 		next += FRAME_NS;
 		// Far behind, after a stall: start the clock over rather than race
@@ -1943,7 +1974,7 @@ static int play(const char* romPath, const char* saves, const char* run) {
 	stopAudio(&engine);
 	// Unsaved play is only ever this engine's own, while it holds the game
 	if (engine.hasPlayedSinceSave && engine.hasLock) {
-		saveState(&engine, "auto");
+		autosave(&engine);
 	}
 	// Unloading writes a clock game's clock into its battery save: while
 	// still holding the game

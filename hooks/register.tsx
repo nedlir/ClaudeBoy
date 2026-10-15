@@ -141,6 +141,9 @@ let countdown = 0
 // The engine, the folder it and this module share, and what it was told
 let engine: ReturnType<Dollar['process']['spawn']> | null = null
 let engineExited: Promise<void> | null = null
+// The engine stopEngine is ending: its exit is no failure, and it isn't
+// played on any more
+let quittingEngine: ReturnType<Dollar['process']['spawn']> | null = null
 let runDir: string | null = null
 let engineError: string | null = null
 // Another session has the game: asking whether to play it here
@@ -176,6 +179,8 @@ let hasWindowFocus = false
 // The gamepad and the slot picker
 let padId: string | null = null
 let lastKeySeq = 0
+// The gamepad's taps, all buttons together, as last posted
+let lastTaps = 0
 let hasKeys = false
 let picker: 'save' | 'load' | null = null
 // The pane's menus over the game, paused meanwhile: opening a game (a path,
@@ -185,7 +190,8 @@ let menu: 'open' | 'games' | null = null
 let menuError: string | null = null
 let foundRoms: string[] = []
 let isPlayAfterOpen = false
-let isSwitchingGame = false
+// Claude finished while a menu was up over the game: counted down after
+let isTurnOverUnderMenu = false
 // The slots' times for the picker, and when they were read
 let slotTimes: Record<string, number> = {}
 let slotsReadAt = 0
@@ -311,12 +317,7 @@ async function switchGame($: Dollar, path: string): Promise<string | null> {
   await $.store.set('rom', rom)
   if (game?.rom === rom) return null
   // The engine plays one game: the old one saves as it ends, a new one starts
-  isSwitchingGame = true
-  try {
-    await stopEngine($)
-  } finally {
-    isSwitchingGame = false
-  }
+  await stopEngine($)
   forgetPicture()
   game = read
   return null
@@ -387,13 +388,19 @@ function cancelTimer() {
   timer = null
 }
 
+// The tools whose dialogs (a permission, a question, a plan) are open: no
+// drop-in until they're answered, however other tool calls end meanwhile.
+// A permission names its tool, not its call: the first call of that tool to
+// end is taken as the one answered.
+let openAsks: string[] = []
+
 // In the game: playing, or counting down to the hand-back
 function isInGame(): boolean {
   return phase === 'playing' || phase === 'countdown'
 }
 
 function armDropIn($: Dollar) {
-  if (!isOn || !isTurnRunning || isDismissed || phase !== 'idle' || menu) return
+  if (!isOn || !isTurnRunning || isDismissed || phase !== 'idle' || menu || openAsks.length) return
   phase = 'waiting'
   timer = $.clock.after(DROP_IN_DELAY_MS, () => void dropIn($))
 }
@@ -524,7 +531,12 @@ async function startPlaying($: Dollar) {
     hasWindowFocus = false
   }
   redraw($)
-  if (engine) scheduleControl($)
+  if (engine && engine === quittingEngine) {
+    // On its way out: a fresh one once it's gone
+    void engineExited?.then(() => {
+      if (isInGame() && !engine) void runEngine($)
+    })
+  } else if (engine) scheduleControl($)
   else void runEngine($)
 }
 
@@ -575,6 +587,7 @@ function keepPlaying($: Dollar) {
 // Leaving the pane, whoever closes it: pause, which saves the game
 function goAway($: Dollar, why: string) {
   isAskingTakeover = false
+  isTurnOverUnderMenu = false
   menu = null
   menuError = null
   isPlayAfterOpen = false
@@ -658,6 +671,8 @@ async function runEngine($: Dollar) {
   // An engine given up on (stopEngine) may end after the next one started:
   // then only its own folder is its to clear
   const isCurrent = engine === child
+  const wasStopped = quittingEngine === child
+  if (wasStopped) quittingEngine = null
   if (stderr) $.ui.log('claudeboy: the engine said: ' + stderr.trim(), { to: 'debug' })
   if (isCurrent) forgetEngine()
   markExited()
@@ -665,7 +680,7 @@ async function runEngine($: Dollar) {
   // Ending on its own while someone plays means it failed or was refused;
   // while they're away, the next drop-in simply starts it again. It also ends
   // when this module unloads, and then there's nothing to close.
-  if (isCurrent && isInGame() && !isSwitchingGame) {
+  if (isCurrent && isInGame() && !wasStopped) {
     try {
       $.ui.toast(engineError ?? "ClaudeBoy's emulator stopped", { timeoutMs: 8000 })
       if (isTurnRunning) isDismissed = true
@@ -681,12 +696,14 @@ function onEngineLine($: Dollar, line: string) {
       announcedSeq = Math.max(announcedSeq, Number(words[0]) || 0)
       void pullCells($)
       break
-    case '@frame':
-      if (words[0]) showImageFrame($, { shm: words[0], format: 'rgba', width: Number(words[1]), height: Number(words[2]) })
+    case '@frame': {
+      const [width = 0, height = 0] = words.slice(1).map((word) => Math.floor(Number(word)) || 0)
+      if (words[0] && width > 0 && height > 0) showImageFrame($, { shm: words[0], format: 'rgba', width, height })
       break
+    }
     case '@term': {
       // Resized, or another font: the picture is laid out anew
-      const [columns = 0, rows = 0, width = 0, height = 0] = words.map(Number)
+      const [columns = 0, rows = 0, width = 0, height = 0] = words.map((word) => Number(word) || 0)
       // A terminal that doesn't say its cells' size keeps the engine's estimate
       if (columns > 0 && rows > 0 && width > 0 && height > 0) cell = { width: width / columns, height: height / rows }
       terminalColumns = columns
@@ -699,14 +716,14 @@ function onEngineLine($: Dollar, line: string) {
       const [width = 0, height = 0] = words.map(Number)
       hasGrid = width > 0 && height > 0
       if (hasGrid) cell = { width, height }
-      if (wanted.view === 'window' && isInGame()) void openDrawerPane($)
+      if (wanted.view === 'window' && isInGame()) void openDrawerPane($).catch(() => false)
       redraw($)
       break
     }
     case '@drawer':
       drawer = { width: Number(words[0]) || 0, workWidth: Number(words[1]) || 0 }
       // Sized now the drawer is: the pane makes room to match
-      if (wanted.view === 'window' && isInGame()) void openDrawerPane($)
+      if (wanted.view === 'window' && isInGame()) void openDrawerPane($).catch(() => false)
       break
     case '@done': {
       const index = commands.findIndex((command) => command.id === Number(words[0]))
@@ -900,6 +917,7 @@ async function stopEngine($: Dollar) {
   awayTimer = null
   const child = engine
   if (!child) return
+  quittingEngine = child
   // It saves and says goodbye on its own; ending the loop is the last resort
   void sendCommand($, 'quit')
   await Promise.race([engineExited, $.clock.sleep(1500)])
@@ -1222,12 +1240,16 @@ async function closeMenu($: Dollar) {
   if (phase === 'playing') {
     await startPlaying($)
     await reopenPane($)
+    if (isTurnOverUnderMenu && !isTurnRunning) startCountdown($)
+    isTurnOverUnderMenu = false
   } else if (isWelcomeOpen) {
     showWelcomeStatus($, game ? 'Ready to play ' + game.title + '.' : NO_GAME)
   } else {
     // Opened while nobody played (/claudeboy open): nothing to go back to.
     // Deferred, as this may run inside the ui.close hook for this very pane.
+    // A turn still running drops in as it would have without the menu.
     $.clock.after(0, () => void $.ui.close({ id: PANE }))
+    armDropIn($)
   }
   redraw($)
 }
@@ -1486,6 +1508,7 @@ export const register: Register = (on) => {
     if (e.agentId) return next(e)
     isTurnRunning = true
     isDismissed = false
+    openAsks = []
     // On or off as /claudeboy last left it in any session
     isOn = (await $.store.get('isOn')) === true
     if (isWelcomeOpen && !menu) {
@@ -1503,10 +1526,13 @@ export const register: Register = (on) => {
   on('turn.complete', async ($, e, next) => {
     if (e.agentId) return next(e)
     isTurnRunning = false
+    openAsks = []
     if (phase === 'waiting' || phase === 'offered') {
       cancelDropIn($)
-    } else if (phase === 'playing' && !isOpenedByCommand && !menu) {
+    } else if (phase === 'playing' && !isOpenedByCommand) {
       if (e.isAborted) await handBack($, '')
+      // Under a menu, the count starts once it closes
+      else if (menu) isTurnOverUnderMenu = true
       else startCountdown($)
     }
     return next(e)
@@ -1515,17 +1541,25 @@ export const register: Register = (on) => {
   // A permission dialog is about to ask the person. In auto mode most asks go
   // to the classifier instead, and this never fires for those: play goes on.
   on('classic.PermissionRequest', async ($, e, next) => {
+    openAsks.push(e.tool_name)
     await needsYou($)
     return next(e)
   })
 
   on('tool.call', async ($, e, next) => {
     // These put a question or a plan to the person whatever the mode
-    if (e.tool === 'AskUserQuestion' || e.tool === 'ExitPlanMode') await needsYou($)
-    const result = await next(e)
-    // Once an answered prompt lets Claude carry on, drop back in
-    armDropIn($)
-    return result
+    if (e.tool === 'AskUserQuestion' || e.tool === 'ExitPlanMode') {
+      openAsks.push(e.tool)
+      await needsYou($)
+    }
+    try {
+      return await next(e)
+    } finally {
+      // Answered (its call ended): once nothing else is asked, drop back in
+      const asked = openAsks.indexOf(e.tool)
+      if (asked >= 0) openAsks.splice(asked, 1)
+      armDropIn($)
+    }
   })
 
   // The pane is closing (this module's own closes don't reach this hook)
@@ -1568,11 +1602,19 @@ export const register: Register = (on) => {
       // A new gamepad counts its keys from one again
       padId = post.pad
       lastKeySeq = 0
+      lastTaps = 0
     }
     if (!hasKeys && (post.held !== 0 || post.keys.length > 0 || post.taps.some((count) => count > 0))) {
       hasKeys = true
       redraw($)
     }
+    // A Game Boy button is "any other key" for the slot picker too
+    const taps = post.taps.reduce((sum, count) => sum + count, 0)
+    if (picker && (post.held !== 0 || taps > lastTaps)) {
+      picker = null
+      redraw($)
+    }
+    lastTaps = taps
     wanted.keys = isInGame() ? post.held : 0
     wanted.taps = post.taps
     scheduleControl($)
