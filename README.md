@@ -241,8 +241,10 @@ writes there once it has loaded the mod.
 
 ## Licenses
 
-mGBA is MPL-2.0. Its source is fetched by `scripts/build.sh` and built into
-`dist/claudeboy-engine`. ROMs aren't included. Use games you own.
+ClaudeBoy's own code is in the public domain, under the
+[Unlicense](LICENSE): do anything you like with it. mGBA, which
+`scripts/build.sh` fetches and builds into `dist/claudeboy-engine`, keeps
+its own license, MPL-2.0. ROMs aren't included. Use games you own.
 
 ## Demo
 
